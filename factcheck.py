@@ -416,7 +416,9 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
 
     `barker_text` is the full text of the barker that just played. The rebuttal
     must sound like a direct continuation of it — same speaker, same thought.
-    Returns a 1-2 sentence plain-text string suitable for TTS.
+    Returns ONE short, witty, fact-first sentence suitable for TTS — now that
+    interruptions fire fast, the barker is a quick interjection and the rebuttal
+    goes straight to the correction.
     Falls back to _fallback_rebuttal if Nebius fails.
     """
     claim = verdict.get("claim", "")
@@ -429,10 +431,11 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
             system_prompt = (
                 "You are a confident, witty heckler who just interrupted a speaker. "
                 "You already said the opener (provided below) — the listener just heard it. "
-                "Now deliver the actual correction: 1-2 punchy spoken sentences that flow "
-                "naturally from where the opener left off, as if it is one continuous speech. "
+                "Now land the correction in ONE short spoken sentence that flows naturally "
+                "from where the opener left off, as if it is one continuous speech. Lead with "
+                "the fact — state what's actually true, with a touch of attitude. "
                 "Do NOT re-introduce yourself. Do NOT repeat the opener. Do NOT say 'Well actually' "
-                "or any similar transition — just continue the thought and land the correction. "
+                "or any similar transition. Keep it tight — one sentence, no rambling. "
                 "No markdown. No URLs. No Citations. Plain spoken text only."
             )
             # TODO(security): claim and summary are LLM-derived from untrusted speaker input — sanitize
@@ -445,9 +448,10 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
         else:
             system_prompt = (
                 "You are a confident, witty heckler catching someone in a factual falsehood. "
-                "Write exactly 1-2 punchy spoken sentences correcting the claim using the provided facts. "
+                "Write exactly ONE short, punchy spoken sentence that corrects the claim, leading "
+                "with the actual fact. A touch of attitude, but tight and fact-first — no rambling. "
                 "No preamble. No 'Well actually'. No markdown. No URLs. No citations. "
-                "Just the correction with attitude — plain text only, as if you are speaking aloud."
+                "Just the correction, plain text only, as if you are speaking aloud."
             )
             user_message = (
                 f"CLAIM (what they said): {claim}\n\n"
@@ -461,7 +465,7 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
                 {"role": "user", "content": user_message},
             ],
             temperature=0.7,
-            max_tokens=80,
+            max_tokens=50,  # one fact-first sentence — keep it tight
         )
 
         raw = resp.choices[0].message.content or ""
