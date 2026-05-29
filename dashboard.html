@@ -92,7 +92,11 @@
   #gauge-svg { width: 260px; height: 145px; overflow: visible; }
 
   /* Needle */
-  .needle-group { transition: transform 0.6s cubic-bezier(.4,2,.6,1); }
+  .needle-group {
+    transform-box: view-box;
+    transform-origin: 130px 130px;
+    transition: transform 0.6s cubic-bezier(.4,.8,.6,1);
+  }
 
   /* Big number */
   #meter-value {
@@ -276,8 +280,8 @@
       <!-- track arc -->
       <path d="M 20 130 A 110 110 0 0 1 240 130"
             fill="none" stroke="#1e1e2e" stroke-width="18" stroke-linecap="round"/>
-      <!-- colored fill arc (drawn via JS) -->
-      <path id="gauge-fill" d=""
+      <!-- colored fill arc — full half-circle, color updated by JS -->
+      <path id="gauge-fill" d="M 20 130 A 110 110 0 0 1 240 130"
             fill="none" stroke="#22c55e" stroke-width="18" stroke-linecap="round"/>
 
       <!-- Zone labels -->
@@ -287,7 +291,7 @@
 
       <!-- Needle -->
       <g id="needle-group" class="needle-group">
-        <line x1="130" y1="130" x2="130" y2="30"
+        <line x1="130" y1="130" x2="130" y2="45"
               stroke="#e2e8f0" stroke-width="2.5" stroke-linecap="round"/>
         <circle cx="130" cy="130" r="6" fill="#e2e8f0"/>
         <circle cx="130" cy="130" r="3" fill="#0a0a0f"/>
@@ -339,18 +343,7 @@ function arcPoint(angleDeg) {
 function setMeter(value) {
   const pct = Math.min(100, Math.max(0, value));
 
-  // Arc fill: recompute the SVG path from left tip to current angle.
-  // This is reliable across all browsers — no dashoffset tricks needed.
-  const startAngle = 180;                       // always left tip
-  const endAngle   = 180 - pct / 100 * 180;    // 180→0 as pct 0→100
-  const [x1, y1] = arcPoint(startAngle);
-  const [x2, y2] = arcPoint(endAngle);
-  const largeArc  = pct > 50 ? 1 : 0;
-  // At exactly 0% keep a zero-length path (invisible, no artefact).
-  const d = pct === 0
-    ? `M ${x1} ${y1}`
-    : `M ${x1} ${y1} A ${R} ${R} 0 ${largeArc} 1 ${x2} ${y2}`;
-  gaugeFill.setAttribute('d', d);
+  // Arc fill: always the full half-circle. Only color changes with score.
 
   // Color: green → yellow → red
   let color;
@@ -360,10 +353,10 @@ function setMeter(value) {
   gaugeFill.setAttribute('stroke', color);
   meterValue.style.color = color;
 
-  // Needle: SVG-native rotate(deg, cx, cy) pivots exactly at the gauge centre.
+  // Needle: CSS transform with transform-origin at gauge centre (see .needle-group).
   // 0% → pointing left (−90° from vertical), 100% → pointing right (+90°).
   const needleDeg = -90 + pct / 100 * 180;
-  needleGroup.setAttribute('transform', `rotate(${needleDeg}, ${CX}, ${CY})`);
+  needleGroup.style.transform = `rotate(${needleDeg}deg)`;
 
   meterValue.textContent = Math.round(pct);
 }
