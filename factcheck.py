@@ -27,6 +27,18 @@ WAV_HEADER_BYTES = 44  # canonical RIFF/WAV header size; Gradium WAVs use standa
 _nebius_client: "OpenAI | None" = None
 _tavily_client: "TavilyClient | None" = None
 
+# Model selection, all overridable via env so slugs aren't hardcoded.
+# Tavily supplies the evidence; the judge mostly classifies that evidence as
+# contradicted/supported/mixed/unknown. Qwen3-30B-A3B (MoE, ~3B active params,
+# ~70 tok/s) matched the 70B's accuracy on the hard judge cases — including the
+# deictic-subject rule — while cutting the judge leg from ~1250ms to ~380ms.
+# Claim extraction is a mechanical "restate the checkable sentence" step, also
+# on Qwen (~205ms vs ~870ms for the 70B). The 70B remains the default rebuttal
+# writer, since that step is hidden behind the barker and not reaction-critical.
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
+EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
+REBUTTAL_MODEL = os.environ.get("REBUTTAL_MODEL", "meta-llama/Llama-3.3-70B-Instruct")
+
 
 def _get_nebius_client() -> "OpenAI":
     global _nebius_client
@@ -122,8 +134,8 @@ def score_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) ->
         "claim": claim,
         "status": status,
         "confidence": confidence,
-        "source_url": best["url"] if best else None,
-        "source_title": best["title"] if best else None,
+        "source_url": best.get("url") if best else None,
+        "source_title": best.get("title") if best else None,
         "summary": tavily_answer[:300] if tavily_answer else "No answer available.",
     }
 
@@ -183,8 +195,8 @@ def parse_verdict_response(
         "claim": claim,
         "status": status,
         "confidence": confidence,
-        "source_url": best["url"] if best else None,
-        "source_title": best["title"] if best else None,
+        "source_url": best.get("url") if best else None,
+        "source_title": best.get("title") if best else None,
         "summary": tavily_answer[:300] if tavily_answer else "No answer available.",
     }
 
@@ -238,7 +250,7 @@ def judge_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) ->
     )
 
     resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct",
+        model=JUDGE_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -273,13 +285,13 @@ def extract_claim(transcript: str) -> str | None:
 
     # TODO(security): transcript is raw speaker input — prompt injection possible if adversarial use.
     resp = client.chat.completions.create(
-        model="meta-llama/Llama-3.3-70B-Instruct",
+        model=EXTRACT_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript},
         ],
         temperature=0.2,
-        max_tokens=120,
+        max_tokens=60,
     )
 
     raw = resp.choices[0].message.content or ""
@@ -314,6 +326,31 @@ def fact_check(claim: str, timings: dict | None = None) -> dict:
     if timings is not None:
         timings["judge"] = time.perf_counter() - t1
     return verdict
+
+
+def warm_up_verdict_path() -> None:
+    """Fire one throwaway extract + judge to spin up the Nebius models at startup.
+
+    Qwen3-30B-A3B (extract + judge model) pays a cold-start penalty on its first
+    request after idle (~2s vs ~0.9s warm). Calling this at startup moves that
+    penalty off the first REAL claim so the demo's first 'caught you' is fast.
+    No Tavily call — we feed canned evidence, since only the LLM legs cold-start.
+    Best-effort: swallows errors so a warm-up hiccup never blocks startup.
+    """
+    try:
+        extract_claim("The Eiffel Tower is located in Paris, France.")
+        judge_verdict(
+            "The Eiffel Tower is in Berlin.",
+            "The Eiffel Tower is located in Paris, France, not Berlin.",
+            [{
+                "content": "The Eiffel Tower is a landmark in Paris, France.",
+                "score": 0.9,
+                "url": "https://example.com/eiffel",
+                "title": "Eiffel Tower",
+            }],
+        )
+    except Exception as exc:
+        print(f"[WARN] verdict-path warm-up failed ({exc})", file=sys.stderr)
 
 
 def check_turn(transcript: str, timings: dict | None = None) -> dict | None:
@@ -393,7 +430,7 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
             )
 
         resp = client.chat.completions.create(
-            model="meta-llama/Llama-3.3-70B-Instruct",
+            model=REBUTTAL_MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},

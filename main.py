@@ -22,7 +22,7 @@ import gradium
 import sounddevice as sd
 from dotenv import load_dotenv
 
-from factcheck import check_turn, generate_rebuttal, play_audio, speak
+from factcheck import check_turn, generate_rebuttal, play_audio, speak, warm_up_verdict_path
 
 load_dotenv()
 
@@ -395,7 +395,11 @@ async def main():
     # measure THIS session's prep latency, so play_barker can pick the shortest
     # barker that still covers it. Network/API speed varies per session; measuring
     # beats hardcoding. CALIBRATION_MARGIN adds headroom for variance.
+    # Warm the verdict-path models (extract + judge) concurrently so the first
+    # REAL claim doesn't pay their cold-start; both legs hit Nebius, so overlap them.
+    warm_task = loop.run_in_executor(None, warm_up_verdict_path)
     prep_budget = await calibrate_prep_latency()
+    await warm_task
 
     stream, q = mic_stream()
     print(f"Listening @ {SAMPLE_RATE} Hz. Speak — Ctrl+C to stop.\n")
