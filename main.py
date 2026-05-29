@@ -271,6 +271,11 @@ class RebuttalStream:
                 continue
             # Prefer async close (these are async generators / async resources);
             # fall back to sync close. Swallow errors — closing is best-effort.
+            # Catch BaseException, not Exception: this runs from fact_check_turn's
+            # finally, where a second cancellation can be injected at `await
+            # aclose()`. If that CancelledError escaped, _close_tts would unwind
+            # before `speaking` is reset, leaving the agent deaf forever (C1/the
+            # re-review's residual gap). Closing must complete regardless.
             try:
                 aclose = getattr(obj, "aclose", None)
                 if aclose is not None:
@@ -279,7 +284,7 @@ class RebuttalStream:
                 close = getattr(obj, "close", None)
                 if close is not None:
                     close()
-            except Exception:
+            except BaseException:
                 pass
         self._chunk_iter = None
         self._tts_stream = None
