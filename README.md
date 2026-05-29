@@ -64,14 +64,15 @@ Open `slide.html` in a browser for the visual architecture diagram.
 ## Files
 
 ```
-main.py          entry point — mic loop, STT, BS meter, barker/rebuttal pipeline
-factcheck.py     fact-checking brain — claim extraction, verdict, rebuttal, TTS
-gen_barkers.py   one-shot script to generate the barker WAV library
-dashboard.html   live browser dashboard (WebSocket)
-slide.html       architecture slide
-barkers/         pre-generated WAV openers graded ~4 s → ~17 s across 10 voices
+main.py            entry point — mic loop, STT, BS meter, barker/rebuttal pipeline
+factcheck.py       fact-checking brain — claim extraction, verdict, rebuttal, TTS
+gen_barkers.py     one-shot script to generate the barker WAV library
+dashboard.html     live browser dashboard (WebSocket)
+slide.html         architecture slide
 test_factcheck.py  unit tests for all pure functions (no network)
 ```
+
+> `barkers/` is generated locally by `gen_barkers.py` and not checked in.
 
 ---
 
@@ -94,11 +95,15 @@ Optional tuning:
 ```
 VAD_THRESHOLD=0.7        # inactivity probability to end a turn
 VAD_STEPS_TO_END=8       # consecutive high-VAD frames before flush (~640 ms)
-LIVE_CHECK_WORDS=15      # dispatch a new check every N new words
+LIVE_CHECK_WORDS=15      # dispatch a new parallel check every N new words
+LIVE_CHECK_MIN_WORDS=10  # minimum words before first live check
 BS_THRESHOLD=1.0         # BS meter threshold (cosmetic; interrupt is verdict-driven)
+CALIBRATION_MARGIN=1.5   # headroom (s) added to measured gen+tts latency
+CALIBRATION_MAX=17.0     # cap on barker budget (s)
 CALIBRATE=1              # set to 0 to skip startup latency calibration
 DASHBOARD_PORT=8765
-INPUT_DEVICE=            # substring or index; unset = system default
+INPUT_DEVICE=            # substring match (e.g. "JBL") or device index; unset = system default
+DEBUG=                   # set to 1 for verbose STT/chunk logging
 ```
 
 ---
