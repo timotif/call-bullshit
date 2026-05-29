@@ -10,13 +10,9 @@ Built in a **5-hour hackathon** in Berlin (29 May 2026) with [Nebius](https://ne
 
 ## Demo
 
-<!-- After you record: commit assets/demo.mp4, or replace the link with a YouTube / Release URL. -->
+**[Watch the demo](assets/demo.mp4)**
 
-**[Watch the demo](./assets/demo.mp4)** — *add `assets/demo.mp4` when ready (link works once the file is in the repo)*
-
-Speak a checkable falsehood into the mic. The agent fact-checks **while you are still talking**, then interrupts with a short opener and a fact-backed correction when evidence says the claim is wrong. Run the [live dashboard](http://localhost:8765) in a browser tab to show the transcript, verdict feed, BS meter, and latency strip.
-
-**Good demo beats (~20–30 s):** one obvious lie → `contradicted` on the dashboard → barker → rebuttal. Optional: meter rising before the heckle fires.
+Live fact-check while speaking → `contradicted` on the [dashboard](http://localhost:8765) → short barker → fact-backed rebuttal.
 
 ---
 
