@@ -35,6 +35,25 @@ BARKERS = [
     ("CF0NgaMwHMMrHZn0", "reuben",
      "Stop — that's false."),
 
+    # ── ~2-3s (covers typical streaming budget ~1.7-2.7s after calibration) ─
+    ("POBHtemksfWQbng0", "garrett",
+     "Whoa — hold on. That's not right at all."),
+
+    ("6MFfc37kq0sBjBjy", "sterling",
+     "Wait — no. That claim doesn't hold up."),
+
+    ("dME3IWyZBvmh1n1q", "toby",
+     "Stop — that's wrong, and the facts back that up."),
+
+    ("6PWnV0Nq4wu7RVBT", "maeve",
+     "Hang on — that's not accurate, not even close."),
+
+    ("_6Aslh2DxfmnRLmP", "russell",
+     "Nope — that's a myth, and we both know it."),
+
+    ("CF0NgaMwHMMrHZn0", "reuben",
+     "Hold up — false claim. Let me correct that."),
+
     # ── ~4s ─────────────────────────────────────────────────────────────────
     ("POBHtemksfWQbng0", "garrett",
      "Whoa — hold on. That's not right. Let me stop you there."),
@@ -146,36 +165,100 @@ BARKERS = [
 OUT_DIR = Path(__file__).parent / "barkers"
 
 
-async def generate_one(client, idx: int, voice_id: str, voice_label: str, text: str) -> dict:
-    filename = f"barker_{idx:02d}_{voice_label}.wav"
-    path = os.path.join(OUT_DIR, filename)
-    print(f"  [{idx:02d}] {voice_label}: {text[:60]}…")
+def _barker_key(voice_id: str, text: str) -> tuple[str, str]:
+    return (voice_id, text)
+
+
+def _load_existing_by_key() -> dict[tuple[str, str], dict]:
+    """Index prior manifest entries by (voice_id, text) when the WAV still exists."""
+    manifest_path = OUT_DIR / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    out: dict[tuple[str, str], dict] = {}
+    for entry in json.loads(manifest_path.read_text()):
+        key = _barker_key(entry["voice_id"], entry["text"])
+        wav = OUT_DIR / entry["file"]
+        if wav.is_file():
+            out[key] = entry
+    return out
+
+
+async def generate_one(
+    client,
+    idx: int,
+    voice_id: str,
+    voice_label: str,
+    text: str,
+    *,
+    filename: str | None = None,
+) -> dict:
+    name = filename or f"barker_{idx:02d}_{voice_label}.wav"
+    path = OUT_DIR / name
+    print(f"  [{idx:02d}] {voice_label}: {text[:60]}{'…' if len(text) > 60 else ''}")
     result = await client.tts(
         setup={"voice_id": voice_id, "output_format": "wav"},
         text=text,
     )
-    with open(path, "wb") as f:
-        f.write(result.raw_data)
-    print(f"       -> {filename}  ({len(result.raw_data):,} bytes)")
-    return {"file": filename, "text": text, "voice": voice_label, "voice_id": voice_id}
+    path.write_bytes(result.raw_data)
+    print(f"       -> {name}  ({len(result.raw_data):,} bytes)")
+    return {"file": name, "text": text, "voice": voice_label, "voice_id": voice_id}
 
 
-async def main():
+def _unused_filename(idx: int, voice_label: str) -> str:
+    """Prefer the canonical name; if taken, append a numeric suffix."""
+    base = f"barker_{idx:02d}_{voice_label}.wav"
+    if not (OUT_DIR / base).exists():
+        return base
+    n = 1
+    while True:
+        alt = f"barker_{idx:02d}_{voice_label}_{n}.wav"
+        if not (OUT_DIR / alt).exists():
+            return alt
+        n += 1
+
+
+async def main() -> None:
     client = gradium.client.GradiumClient(api_key=os.environ["GRADIUM_API_KEY"])
-    os.makedirs(OUT_DIR, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    print(f"Generating {len(BARKERS)} barkers across {len({v for _,v,_ in BARKERS})} voices…\n")
+    existing = _load_existing_by_key()
+    to_generate = sum(
+        1 for vid, label, text in BARKERS if _barker_key(vid, text) not in existing
+    )
+    print(
+        f"Barkers: {len(BARKERS)} total, {len(existing)} on disk, "
+        f"{to_generate} to synthesize\n"
+    )
 
-    # Generate sequentially to avoid hammering the TTS API
-    manifest = []
+    manifest: list[dict] = []
+    skipped = 0
+    generated = 0
+
     for idx, (voice_id, voice_label, text) in enumerate(BARKERS):
-        entry = await generate_one(client, idx, voice_id, voice_label, text)
+        key = _barker_key(voice_id, text)
+        prior = existing.get(key)
+        if prior is not None:
+            print(f"  [{idx:02d}] {voice_label}: skip — {prior['file']}")
+            manifest.append(prior)
+            skipped += 1
+            continue
+
+        entry = await generate_one(
+            client, idx, voice_id, voice_label, text,
+            filename=_unused_filename(idx, voice_label),
+        )
         manifest.append(entry)
+        generated += 1
 
     manifest_path = OUT_DIR / "manifest.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2, ensure_ascii=False)
-    print(f"\nDone. {len(manifest)} barkers written to {manifest_path}")
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        f"\nDone. manifest={manifest_path}  "
+        f"({skipped} reused, {generated} new, {len(manifest)} total)"
+    )
 
 
 if __name__ == "__main__":
