@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Call Bullshit — Live Dashboard</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12121a;
+    --border: #1e1e2e;
+    --green: #22c55e;
+    --yellow: #eab308;
+    --red: #ef4444;
+    --blue: #3b82f6;
+    --gray: #6b7280;
+    --text: #e2e8f0;
+    --dim: #64748b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    padding: 12px;
+  }
+
+  /* ── Header ── */
+  header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .logo { font-size: 1.1rem; font-weight: 700; letter-spacing: 0.05em; }
+  .logo span { color: var(--red); }
+  #status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--gray);
+    display: inline-block;
+    margin-right: 6px;
+    transition: background 0.3s;
+  }
+  #status-dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  #status-label { font-size: 0.75rem; color: var(--dim); }
+
+  /* ── Panels ── */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .panel-title {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 12px;
+  }
+
+  /* ── BS Meter (left panel, top half) ── */
+  #meter-panel {
+    grid-column: 1;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+  }
+
+  /* Arc gauge */
+  #gauge-wrap {
+    position: relative;
+    width: 260px;
+    height: 145px;
+    overflow: visible;
+  }
+  #gauge-svg { width: 260px; height: 145px; overflow: visible; }
+
+  /* Needle */
+  .needle-group { transition: transform 0.6s cubic-bezier(.4,2,.6,1); }
+
+  /* Big number */
+  #meter-value {
+    font-size: 3.5rem;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    transition: color 0.5s;
+    color: var(--green);
+  }
+  #meter-label {
+    font-size: 0.7rem;
+    color: var(--dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  /* Flash overlay on heckle */
+  #flash-overlay {
+    position: fixed; inset: 0;
+    background: rgba(239,68,68,0.25);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    z-index: 100;
+  }
+
+  /* Calibration / status banner */
+  #status-banner {
+    display: none;
+    position: fixed;
+    top: 60px; left: 50%; transform: translateX(-50%);
+    background: #1e1e2e;
+    border: 1px solid var(--yellow);
+    color: var(--yellow);
+    font-size: 0.8rem;
+    padding: 8px 20px;
+    border-radius: 6px;
+    z-index: 200;
+    white-space: nowrap;
+    animation: pulse-border 1s ease-in-out infinite;
+  }
+  #status-banner.ready {
+    border-color: var(--green);
+    color: var(--green);
+    animation: none;
+  }
+  @keyframes pulse-border {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.5; }
+  }
+
+  /* Latency table */
+  #latency-strip {
+    font-size: 0.7rem;
+    width: 100%;
+  }
+  .lat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    color: var(--dim);
+    transition: color 0.3s;
+  }
+  .lat-row.has-value { color: var(--text); }
+  .lat-row.slowest   { color: var(--red); font-weight: 700; }
+  .lat-row.total     { color: var(--yellow); font-weight: 700; border-bottom: none; margin-top: 4px; }
+  .lat-label { flex: 1; }
+  .lat-value { text-align: right; font-variant-numeric: tabular-nums; min-width: 60px; }
+
+  /* ── Right column: transcript + verdict feed ── */
+  #right-col {
+    grid-column: 2;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: hidden;
+  }
+  #transcript-panel { flex: 0 0 auto; max-height: 30%; }
+  #transcript-live {
+    font-size: 0.85rem;
+    color: var(--dim);
+    min-height: 1.2em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  #transcript-live.active { color: var(--text); }
+
+  /* Verdict feed */
+  #verdict-panel { flex: 1 1 0; overflow: hidden; }
+  #verdict-feed {
+    display: flex;
+    flex-direction: column-reverse;
+    gap: 8px;
+    overflow-y: auto;
+    height: calc(100% - 28px);
+    padding-right: 4px;
+  }
+  #verdict-feed::-webkit-scrollbar { width: 4px; }
+  #verdict-feed::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .verdict-card {
+    border-radius: 6px;
+    padding: 10px 12px;
+    border-left: 3px solid var(--gray);
+    background: rgba(255,255,255,0.03);
+    animation: slide-in 0.3s ease;
+  }
+  .verdict-card.contradicted { border-color: var(--red); }
+  .verdict-card.supported    { border-color: var(--green); }
+  .verdict-card.mixed        { border-color: var(--yellow); }
+  .verdict-card.unknown      { border-color: var(--gray); }
+  .verdict-card.heckle       { border-color: var(--red); background: rgba(239,68,68,0.08); }
+  .verdict-card.no-claim     { border-color: #334155; opacity: 0.5; }
+
+  .verdict-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .verdict-status {
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .contradicted .verdict-status { color: var(--red); }
+  .supported    .verdict-status { color: var(--green); }
+  .mixed        .verdict-status { color: var(--yellow); }
+  .unknown      .verdict-status { color: var(--gray); }
+  .heckle       .verdict-status { color: var(--red); }
+  .no-claim     .verdict-status { color: #475569; }
+
+  .verdict-conf {
+    font-size: 0.65rem;
+    color: var(--dim);
+    margin-left: auto;
+  }
+  .verdict-source {
+    font-size: 0.72rem;
+    color: var(--blue);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .verdict-claim {
+    font-size: 0.78rem;
+    color: var(--text);
+    margin-top: 2px;
+    opacity: 0.85;
+  }
+
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateX(16px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+</style>
+</head>
+<body>
+
+<div id="flash-overlay"></div>
+<div id="status-banner"></div>
+
+<header>
+  <div class="logo">CALL <span>BULLSHIT</span> — LIVE</div>
+  <div>
+    <span id="status-dot"></span>
+    <span id="status-label">connecting…</span>
+  </div>
+</header>
+
+<!-- BS Meter -->
+<div class="panel" id="meter-panel">
+  <div class="panel-title">BS Meter</div>
+
+  <div id="gauge-wrap">
+    <svg id="gauge-svg" viewBox="0 0 260 145">
+      <!-- track arc -->
+      <path d="M 20 130 A 110 110 0 0 1 240 130"
+            fill="none" stroke="#1e1e2e" stroke-width="18" stroke-linecap="round"/>
+      <!-- colored fill arc (drawn via JS) -->
+      <path id="gauge-fill" d=""
+            fill="none" stroke="#22c55e" stroke-width="18" stroke-linecap="round"/>
+
+      <!-- Zone labels -->
+      <text x="14" y="148" fill="#22c55e" font-size="10" font-family="monospace">0</text>
+      <text x="123" y="18" fill="#eab308" font-size="10" font-family="monospace" text-anchor="middle">50</text>
+      <text x="237" y="148" fill="#ef4444" font-size="10" font-family="monospace" text-anchor="end">100</text>
+
+      <!-- Needle -->
+      <g id="needle-group" class="needle-group">
+        <line x1="130" y1="130" x2="130" y2="30"
+              stroke="#e2e8f0" stroke-width="2.5" stroke-linecap="round"/>
+        <circle cx="130" cy="130" r="6" fill="#e2e8f0"/>
+        <circle cx="130" cy="130" r="3" fill="#0a0a0f"/>
+      </g>
+    </svg>
+  </div>
+
+  <div id="meter-value">0</div>
+  <div id="meter-label">bullshit score</div>
+  <div id="latency-strip">
+    <div class="lat-row" id="lat-claim"><span class="lat-label">claim extract</span><span class="lat-value">—</span></div>
+    <div class="lat-row" id="lat-search"><span class="lat-label">web search</span><span class="lat-value">—</span></div>
+    <div class="lat-row" id="lat-judge"><span class="lat-label">judge</span><span class="lat-value">—</span></div>
+    <div class="lat-row" id="lat-verdict" style="border-top:1px solid rgba(255,255,255,0.1);margin-top:2px;padding-top:4px;"><span class="lat-label">verdict total</span><span class="lat-value">—</span></div>
+    <div class="lat-row" id="lat-rebut"><span class="lat-label">rebut gen+tts</span><span class="lat-value">—</span></div>
+    <div class="lat-row" id="lat-barker"><span class="lat-label">barker</span><span class="lat-value">—</span></div>
+  </div>
+</div>
+
+<!-- Right column -->
+<div id="right-col">
+  <div class="panel" id="transcript-panel">
+    <div class="panel-title">Live Transcript</div>
+    <div id="transcript-live">waiting for speech…</div>
+  </div>
+
+  <div class="panel" id="verdict-panel">
+    <div class="panel-title">Verdict Feed</div>
+    <div id="verdict-feed"></div>
+  </div>
+</div>
+
+<script>
+// ── Gauge math ──────────────────────────────────────────────────────────────
+// Half-circle arc: centre (130,130), radius 110.
+// 0% = left tip (20,130), 100% = right tip (240,130).
+// Angles in standard math coords: 0% → 180°, 100% → 0°.
+const CX = 130, CY = 130, R = 110;
+
+const gaugeFill = document.getElementById('gauge-fill');
+const needleGroup = document.getElementById('needle-group');
+const meterValue = document.getElementById('meter-value');
+
+function arcPoint(angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  return [CX + R * Math.cos(rad), CY - R * Math.sin(rad)];
+}
+
+function setMeter(value) {
+  const pct = Math.min(100, Math.max(0, value));
+
+  // Arc fill: recompute the SVG path from left tip to current angle.
+  // This is reliable across all browsers — no dashoffset tricks needed.
+  const startAngle = 180;                       // always left tip
+  const endAngle   = 180 - pct / 100 * 180;    // 180→0 as pct 0→100
+  const [x1, y1] = arcPoint(startAngle);
+  const [x2, y2] = arcPoint(endAngle);
+  const largeArc  = pct > 50 ? 1 : 0;
+  // At exactly 0% keep a zero-length path (invisible, no artefact).
+  const d = pct === 0
+    ? `M ${x1} ${y1}`
+    : `M ${x1} ${y1} A ${R} ${R} 0 ${largeArc} 1 ${x2} ${y2}`;
+  gaugeFill.setAttribute('d', d);
+
+  // Color: green → yellow → red
+  let color;
+  if (pct < 40)      color = '#22c55e';
+  else if (pct < 70) color = '#eab308';
+  else               color = '#ef4444';
+  gaugeFill.setAttribute('stroke', color);
+  meterValue.style.color = color;
+
+  // Needle: SVG-native rotate(deg, cx, cy) pivots exactly at the gauge centre.
+  // 0% → pointing left (−90° from vertical), 100% → pointing right (+90°).
+  const needleDeg = -90 + pct / 100 * 180;
+  needleGroup.setAttribute('transform', `rotate(${needleDeg}, ${CX}, ${CY})`);
+
+  meterValue.textContent = Math.round(pct);
+}
+
+// ── Flash on heckle ─────────────────────────────────────────────────────────
+const flashOverlay = document.getElementById('flash-overlay');
+function triggerFlash() {
+  flashOverlay.style.opacity = '1';
+  setTimeout(() => { flashOverlay.style.opacity = '0'; }, 400);
+}
+
+// ── Verdict feed ─────────────────────────────────────────────────────────────
+const feed = document.getElementById('verdict-feed');
+const MAX_CARDS = 40;
+
+function addCard(cls, statusText, conf, source, claim) {
+  const card = document.createElement('div');
+  card.className = `verdict-card ${cls}`;
+  const confStr = conf != null ? `${Math.round(conf * 100)}%` : '';
+  card.innerHTML = `
+    <div class="verdict-header">
+      <span class="verdict-status">${statusText}</span>
+      ${confStr ? `<span class="verdict-conf">conf ${confStr}</span>` : ''}
+    </div>
+    ${source ? `<div class="verdict-source">${escHtml(source)}</div>` : ''}
+    ${claim  ? `<div class="verdict-claim">${escHtml(claim)}</div>`  : ''}
+  `;
+  feed.prepend(card);
+  // Trim
+  while (feed.children.length > MAX_CARDS) feed.removeChild(feed.lastChild);
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Latency strip ─────────────────────────────────────────────────────────
+function showLatency(data) {
+  const ms = v => v != null ? `${Math.round(v * 1000)} ms` : '—';
+  const slowest = data.slowest || null;
+
+  const rows = [
+    ['lat-claim',  'extract_claim', null],
+    ['lat-search', 'tavily',        null],
+    ['lat-judge',  'judge',         null],
+    ['lat-verdict', null,           'verdict_total'],   // computed total
+    ['lat-rebut',  null,            null,  (data.rebuttal_gen||0) + (data.tts||0) || null],
+    ['lat-barker', 'barker_play',   null],
+  ];
+
+  rows.forEach(([id, key, totalKey, override]) => {
+    const row = document.getElementById(id);
+    if (!row) return;
+    const raw = override !== undefined ? override : (totalKey ? data[totalKey] : data[key]);
+    const valEl = row.querySelector('.lat-value');
+    valEl.textContent = ms(raw);
+    row.className = 'lat-row';
+    if (raw != null) row.classList.add('has-value');
+    if (totalKey === 'verdict_total') row.classList.add('total');
+    if (key && key === slowest) row.classList.add('slowest');
+  });
+}
+
+// ── Transcript ───────────────────────────────────────────────────────────────
+const transcriptLive = document.getElementById('transcript-live');
+function setTranscript(text, isFinal) {
+  transcriptLive.textContent = text || '…';
+  transcriptLive.className = isFinal ? '' : 'active';
+}
+
+// ── Status banner ────────────────────────────────────────────────────────────
+const statusBanner = document.getElementById('status-banner');
+let bannerTimer = null;
+
+function showBanner(text, phase) {
+  statusBanner.textContent = text;
+  statusBanner.className = phase === 'ready' ? 'ready' : '';
+  statusBanner.style.display = 'block';
+  clearTimeout(bannerTimer);
+  if (phase === 'ready') {
+    bannerTimer = setTimeout(() => { statusBanner.style.display = 'none'; }, 3500);
+  }
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+const statusDot = document.getElementById('status-dot');
+const statusLabel = document.getElementById('status-label');
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => {
+    statusDot.className = 'live';
+    statusLabel.textContent = 'live';
+  };
+
+  ws.onclose = () => {
+    statusDot.className = '';
+    statusLabel.textContent = 'reconnecting…';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    switch (msg.type) {
+      case 'meter': {
+        // value is 0–1 (bs_meter); scale to 0–100 for display
+        setMeter(msg.value * 100);
+        break;
+      }
+      case 'transcript': {
+        setTranscript(msg.text, msg.final ?? false);
+        break;
+      }
+      case 'verdict': {
+        const { status, confidence, source_title, claim } = msg;
+        addCard(status || 'unknown', status || 'unknown', confidence, source_title, claim);
+        break;
+      }
+      case 'no_claim': {
+        addCard('no-claim', 'no claim', null, null, msg.turn || null);
+        break;
+      }
+      case 'heckle': {
+        triggerFlash();
+        addCard('heckle', '🚨 HECKLED', null, null, msg.rebuttal || null);
+        setMeter(0);  // meter resets to 0 after heckle
+        break;
+      }
+      case 'latency': {
+        showLatency(msg);
+        break;
+      }
+      case 'status': {
+        showBanner(msg.text, msg.phase);
+        break;
+      }
+    }
+  };
+}
+
+connect();
+setMeter(0);
+</script>
+</body>
+</html>

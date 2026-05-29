@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Call Bullshit — Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&family=JetBrains+Mono:wght@400;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:      #07070f;
+    --panel:   #0f0f1a;
+    --border:  #1c1c2e;
+    --red:     #ef4444;
+    --orange:  #f97316;
+    --yellow:  #eab308;
+    --green:   #22c55e;
+    --blue:    #3b82f6;
+    --purple:  #a855f7;
+    --cyan:    #06b6d4;
+    --text:    #f1f5f9;
+    --dim:     #64748b;
+    --muted:   #1e293b;
+  }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, sans-serif;
+    overflow: hidden;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 32px 48px;
+    gap: 28px;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .title {
+    font-size: 2.6rem;
+    font-weight: 900;
+    letter-spacing: -0.03em;
+    line-height: 1;
+  }
+  .title em {
+    font-style: normal;
+    color: var(--red);
+  }
+  .subtitle {
+    font-size: 0.95rem;
+    color: var(--dim);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+
+  /* ── Main pipeline row ── */
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    width: 100%;
+    max-width: 1100px;
+  }
+
+  .node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .node-box {
+    width: 100%;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    padding: 14px 10px 12px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    position: relative;
+    transition: border-color 0.2s;
+  }
+
+  .node-icon {
+    font-size: 1.6rem;
+    line-height: 1;
+  }
+
+  .node-name {
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-align: center;
+  }
+
+  .node-desc {
+    font-size: 0.6rem;
+    color: var(--dim);
+    text-align: center;
+    line-height: 1.4;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* Partner badge */
+  .badge {
+    font-size: 0.55rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 99px;
+    border: 1px solid currentColor;
+    margin-top: 2px;
+  }
+
+  /* Node accent colours */
+  .node-mic   .node-box { border-color: #334155; }
+  .node-mic   .node-name { color: var(--text); }
+
+  .node-stt   .node-box { border-color: #1d4ed8; background: #0f1729; }
+  .node-stt   .node-name { color: #93c5fd; }
+  .node-stt   .badge { color: #3b82f6; }
+
+  .node-check .node-box { border-color: #4c1d95; background: #120d1f; }
+  .node-check .node-name { color: #c4b5fd; }
+
+  .node-nebius .node-box { border-color: #7c3aed; background: #110d1e; }
+  .node-nebius .node-name { color: #c4b5fd; }
+  .node-nebius .badge { color: #a855f7; }
+
+  .node-tavily .node-box { border-color: #0e7490; background: #071318; }
+  .node-tavily .node-name { color: #67e8f9; }
+  .node-tavily .badge { color: #06b6d4; }
+
+  .node-tts   .node-box { border-color: #1d4ed8; background: #0f1729; }
+  .node-tts   .node-name { color: #93c5fd; }
+  .node-tts   .badge { color: #3b82f6; }
+
+  .node-dash  .node-box { border-color: #166534; background: #071411; }
+  .node-dash  .node-name { color: #86efac; }
+
+  /* ── Arrows ── */
+  .arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 0 4px;
+    flex-shrink: 0;
+  }
+  .arrow-line {
+    width: 32px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--muted), var(--dim));
+    border-radius: 1px;
+    position: relative;
+  }
+  .arrow-line::after {
+    content: '';
+    position: absolute;
+    right: -1px; top: -4px;
+    border: 5px solid transparent;
+    border-left-color: var(--dim);
+    border-right: none;
+  }
+  .arrow-label {
+    font-size: 0.5rem;
+    color: var(--dim);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  /* ── Parallel check annotation ── */
+  .parallel-note {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #0f0f1a;
+    border: 1px solid #1c2d1c;
+    border-radius: 8px;
+    padding: 8px 18px;
+    max-width: 680px;
+    width: 100%;
+  }
+  .parallel-note .icon { font-size: 1.1rem; }
+  .parallel-note p {
+    font-size: 0.68rem;
+    color: #94a3b8;
+    line-height: 1.5;
+  }
+  .parallel-note strong { color: var(--green); }
+
+  /* ── Partner row ── */
+  .partners {
+    display: flex;
+    gap: 32px;
+    align-items: center;
+  }
+  .partner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    opacity: 0.7;
+  }
+  .partner-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+  .partner-name {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .sep { color: var(--border); font-size: 1.2rem; }
+
+  /* ── Interrupt callout ── */
+  .interrupt-callout {
+    position: absolute;
+    bottom: -38px;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    pointer-events: none;
+  }
+  .interrupt-callout .ic-line {
+    width: 2px;
+    height: 14px;
+    background: var(--red);
+    opacity: 0.6;
+  }
+  .interrupt-callout .ic-label {
+    font-size: 0.5rem;
+    color: var(--red);
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  /* glow pulse on TTS node */
+  .node-tts .node-box {
+    animation: glow-blue 3s ease-in-out infinite;
+  }
+  @keyframes glow-blue {
+    0%, 100% { box-shadow: none; }
+    50%       { box-shadow: 0 0 18px rgba(59,130,246,0.25); }
+  }
+  .node-check .node-box {
+    animation: glow-purple 3s ease-in-out infinite 1s;
+  }
+  @keyframes glow-purple {
+    0%, 100% { box-shadow: none; }
+    50%       { box-shadow: 0 0 18px rgba(168,85,247,0.2); }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">CALL <em>BULLSHIT</em></div>
+  <div class="subtitle">Real-time live fact-check agent — architecture</div>
+</header>
+
+<!-- Main pipeline -->
+<div class="pipeline">
+
+  <!-- Mic -->
+  <div class="node node-mic">
+    <div class="node-box">
+      <div class="node-icon">🎙️</div>
+      <div class="node-name">Microphone</div>
+      <div class="node-desc">24 kHz PCM<br>80 ms frames</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">PCM stream</div>
+  </div>
+
+  <!-- STT -->
+  <div class="node node-stt">
+    <div class="node-box">
+      <div class="node-icon">👂</div>
+      <div class="node-name">Speech-to-Text</div>
+      <div class="node-desc">streaming STT<br>VAD turn detection</div>
+      <div class="badge">Gradium</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">live text</div>
+  </div>
+
+  <!-- Parallel fact-check -->
+  <div class="node node-check" style="flex:1.3; position:relative;">
+    <div class="node-box">
+      <div class="node-icon">⚡</div>
+      <div class="node-name">Parallel Fact-Check</div>
+      <div class="node-desc">every ~15 words<br>while still speaking</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">claim</div>
+  </div>
+
+  <!-- Nebius -->
+  <div class="node node-nebius">
+    <div class="node-box">
+      <div class="node-icon">🧠</div>
+      <div class="node-name">LLM Judge</div>
+      <div class="node-desc">extract · judge<br>rebuttal gen</div>
+      <div class="badge">Nebius</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">query</div>
+  </div>
+
+  <!-- Tavily -->
+  <div class="node node-tavily">
+    <div class="node-box">
+      <div class="node-icon">🔍</div>
+      <div class="node-name">Web Search</div>
+      <div class="node-desc">real-time facts<br>live evidence</div>
+      <div class="badge">Tavily</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">verdict</div>
+  </div>
+
+  <!-- TTS -->
+  <div class="node node-tts">
+    <div class="node-box">
+      <div class="node-icon">📢</div>
+      <div class="node-name">Voice Interrupt</div>
+      <div class="node-desc">barker + rebuttal<br>10 voices</div>
+      <div class="badge">Gradium TTS</div>
+    </div>
+  </div>
+
+  <div class="arrow">
+    <div class="arrow-line"></div>
+    <div class="arrow-label">WebSocket</div>
+  </div>
+
+  <!-- Dashboard -->
+  <div class="node node-dash">
+    <div class="node-box">
+      <div class="node-icon">📊</div>
+      <div class="node-name">Live Dashboard</div>
+      <div class="node-desc">BS meter · transcript<br>verdict feed</div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Parallel check note -->
+<div class="parallel-note">
+  <span class="icon">⚡</span>
+  <p>
+    <strong>Interrupts mid-speech</strong> — fact-check tasks are dispatched in parallel every ~15 words while the speaker is still talking.
+    The first <strong>contradicted</strong> verdict (conf ≥ 0.5) fires the barker immediately, then the rebuttal continues the same voice seamlessly.
+  </p>
+</div>
+
+<!-- Partner credits -->
+<div class="partners">
+  <div class="partner">
+    <div class="partner-dot" style="background:#3b82f6"></div>
+    <div class="partner-name" style="color:#93c5fd">Gradium</div>
+    <div style="font-size:0.6rem;color:var(--dim);margin-left:4px">STT + TTS</div>
+  </div>
+  <div class="sep">·</div>
+  <div class="partner">
+    <div class="partner-dot" style="background:#a855f7"></div>
+    <div class="partner-name" style="color:#c4b5fd">Nebius</div>
+    <div style="font-size:0.6rem;color:var(--dim);margin-left:4px">LLM inference</div>
+  </div>
+  <div class="sep">·</div>
+  <div class="partner">
+    <div class="partner-dot" style="background:#06b6d4"></div>
+    <div class="partner-name" style="color:#67e8f9">Tavily</div>
+    <div style="font-size:0.6rem;color:var(--dim);margin-left:4px">Real-time web search</div>
+  </div>
+</div>
+
+</body>
+</html>
