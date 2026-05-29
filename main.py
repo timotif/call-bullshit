@@ -326,17 +326,17 @@ def pick_barker(barkers: list[dict], budget: float) -> dict:
     return pick
 
 
-def play_barker(barkers: list[dict], budget: float = 0.0) -> dict | None:
+def play_barker(barkers: list[dict], budget: float = 0.0, chosen: dict | None = None) -> dict | None:
     """Play a barker WAV synchronously (blocking; caller runs it in a thread).
 
-    Picks the shortest barker that covers `budget` seconds of rebuttal prep;
-    with budget=0 this is just the shortest barker.
-    Returns the chosen barker dict (so the caller can match the rebuttal voice).
+    If `chosen` is provided it is played directly (caller already called
+    pick_barker for voice-matching). Otherwise picks via pick_barker(budget).
+    Returns the played barker dict.
     """
     if not barkers:
         print("[barker] (no barker audio available)")
         return None
-    pick = pick_barker(barkers, budget)
+    pick = chosen if chosen is not None else pick_barker(barkers, budget)
     path = BARKERS_DIR / pick["file"]
     voice_label = pick.get("voice", "")
     print(f"\n[BARKER ~{pick.get('duration', 0):.0f}s voice={voice_label}] {pick['text']!r}")
@@ -445,7 +445,7 @@ async def main():
                     prepare_rebuttal(verdict, timings, voice_id=rebuttal_voice_id, barker_text=rebuttal_barker_text)
                 )
                 bark_t = time.perf_counter()
-                await loop.run_in_executor(None, play_barker, barkers, prep_budget)
+                await loop.run_in_executor(None, play_barker, barkers, prep_budget, chosen_barker)
                 bark_end = time.perf_counter()
                 timings["barker_play"] = bark_end - bark_t
                 rebuttal, wav = await rebuttal_task

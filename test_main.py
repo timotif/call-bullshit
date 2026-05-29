@@ -92,6 +92,40 @@ def test_pick_barker_exhausted_pool_resets_and_continues():
         assert a != b
 
 
+def test_play_barker_uses_chosen_without_extra_pick():
+    """play_barker(chosen=X) must play X and not consume another slot from the
+    shuffle queue — prevents the double-pick that mismatches rebuttal voice."""
+    from unittest.mock import patch, MagicMock
+    barkers = _barkers([6.0, 7.0, 8.0])
+    chosen = barkers[1]  # pick slot 1 explicitly
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    with patch("main.BARKERS_DIR") as mock_dir, \
+         patch("main.sd") as mock_sd, \
+         patch("main.wave") as mock_wave:
+        mock_sd.RawOutputStream.return_value = mock_stream
+        mock_path = MagicMock()
+        mock_path.__str__ = lambda s: "barker_01.wav"
+        mock_path.read_bytes.return_value = b"\x00" * (44 + 100)
+        mock_dir.__truediv__ = lambda s, f: mock_path
+        mock_wf = MagicMock()
+        mock_wf.__enter__ = MagicMock(return_value=mock_wf)
+        mock_wf.__exit__ = MagicMock(return_value=False)
+        mock_wf.getframerate.return_value = 24000
+        mock_wf.getnchannels.return_value = 1
+        mock_wave.open.return_value = mock_wf
+
+        result = main.play_barker(barkers, budget=5.0, chosen=chosen)
+
+    # Must return exactly the chosen barker
+    assert result is chosen
+    # Queue must still be untouched (no extra pick_barker call)
+    assert frozenset(b["file"] for b in barkers) not in main._barker_queues
+
+
 def test_pick_barker_single_eligible_always_returns_it():
     """With only one eligible barker, it must still be returned (no infinite loop)."""
     barkers = _barkers([10.0, 2.0])
