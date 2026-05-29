@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import queue
+import random
 import sys
 import time
 import wave
@@ -288,16 +289,41 @@ def load_barkers() -> list[dict]:
     return barkers
 
 
-def pick_barker(barkers: list[dict], budget: float) -> dict:
-    """Pick the SHORTEST barker whose duration covers `budget` (the prep latency).
+# Shuffle queues keyed by frozenset of candidate file names, so each eligible
+# pool gets its own independent non-repeating sequence.
+_barker_queues: dict[frozenset, list[dict]] = {}
+_barker_last: dict[frozenset, str] = {}  # last file played per pool key
 
-    Keeps talk-time minimal while still fully hiding rebuttal prep. If none are
-    long enough, returns the longest available (best-effort cover).
+
+def pick_barker(barkers: list[dict], budget: float) -> dict:
+    """Pick a random barker whose duration covers `budget` (the prep latency).
+
+    Uses a shuffle-queue per eligible pool so the same barker is never picked
+    twice until all others in the pool have been played. On pool reset, ensures
+    the first pick of the new cycle doesn't repeat the last pick of the old one.
+    If no barker covers the budget, falls back to the pool of longest-duration
+    barkers.
     """
     covering = [b for b in barkers if b.get("duration", 0.0) >= budget]
     if covering:
-        return min(covering, key=lambda b: b["duration"])
-    return max(barkers, key=lambda b: b.get("duration", 0.0))
+        pool = covering
+    else:
+        max_dur = max(b.get("duration", 0.0) for b in barkers)
+        pool = [b for b in barkers if b.get("duration", 0.0) == max_dur]
+
+    key = frozenset(b["file"] for b in pool)
+    if key not in _barker_queues or not _barker_queues[key]:
+        shuffled = list(pool)
+        random.shuffle(shuffled)
+        # Avoid starting with the same barker that ended the previous cycle.
+        last = _barker_last.get(key)
+        if last and len(shuffled) > 1 and shuffled[-1]["file"] == last:
+            shuffled[-1], shuffled[-2] = shuffled[-2], shuffled[-1]
+        _barker_queues[key] = shuffled
+
+    pick = _barker_queues[key].pop()
+    _barker_last[key] = pick["file"]
+    return pick
 
 
 def play_barker(barkers: list[dict], budget: float = 0.0) -> dict | None:
