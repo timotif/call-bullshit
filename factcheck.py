@@ -40,6 +40,12 @@ JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 REBUTTAL_MODEL = os.environ.get("REBUTTAL_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 
+# Tavily fetch + how much of each result the judge sees. Latency is flat across
+# 3-5 results (measured), so we fetch 5 and feed the judge ALL of them — fetched
+# evidence shouldn't be discarded. SNIPPET_CHARS bounds each result's prompt cost.
+TAVILY_MAX_RESULTS = int(os.environ.get("TAVILY_MAX_RESULTS", "5"))
+SNIPPET_CHARS = int(os.environ.get("SNIPPET_CHARS", "400"))
+
 
 def _get_nebius_client() -> "OpenAI":
     global _nebius_client
@@ -237,17 +243,20 @@ def judge_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) ->
         'SPECIFIC, IDENTIFIED assertion is plainly false. When in doubt, prefer "unknown".'
     )
 
-    # Build user message with claim + top 2 result snippets for more context.
-    top_snippets = "\n".join(
-        f"[{i+1}] {r.get('content', '')[:400]}"
-        for i, r in enumerate(tavily_results[:2])
+    # Feed the judge every result Tavily returned, not just the top 2 — if Tavily
+    # spent the latency fetching them (measured identical for 3 vs 5 results), the
+    # judge should weigh them, especially when sources conflict. Each snippet is
+    # capped at SNIPPET_CHARS so the prompt stays bounded regardless of result count.
+    snippets = "\n".join(
+        f"[{i+1}] {r.get('content', '')[:SNIPPET_CHARS]}"
+        for i, r in enumerate(tavily_results)
     )
     # TODO(security): claim and tavily_answer are untrusted — consider length-capping and
     # stripping injection patterns before interpolating into the LLM user message.
     user_message = (
         f"CLAIM: {claim}\n\n"
         f"SEARCH ANSWER: {tavily_answer}\n\n"
-        f"TOP RESULTS:\n{top_snippets}"
+        f"TOP RESULTS:\n{snippets}"
     )
 
     resp = client.chat.completions.create(
@@ -312,7 +321,7 @@ def fact_check(claim: str, timings: dict | None = None) -> dict:
     # co-occur (which made false claims like "Paris is in Belgium" look supported).
     query = f"Is it true that {claim} Fact check this statement."
     t0 = time.perf_counter()
-    r = tv.search(query=query, search_depth="fast", include_answer=True, max_results=5)
+    r = tv.search(query=query, search_depth="fast", include_answer=True, max_results=TAVILY_MAX_RESULTS)
     if timings is not None:
         timings["tavily"] = time.perf_counter() - t0
     answer = r.get("answer", "")
