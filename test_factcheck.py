@@ -5,7 +5,13 @@ parse_verdict_response, and _fallback_rebuttal are tested.
 """
 import os
 import pytest
-from factcheck import parse_claim_response, score_verdict, parse_verdict_response, _fallback_rebuttal
+from factcheck import (
+    parse_claim_response,
+    score_verdict,
+    parse_verdict_response,
+    _fallback_rebuttal,
+    _trim_spoken,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -192,25 +198,30 @@ def test_pvr_empty_results_gives_none_source():
 # _fallback_rebuttal (pure helper — slice 4)
 # ---------------------------------------------------------------------------
 
+def test_trim_spoken_caps_words_and_sentences():
+    long = "One. Two. Three. Four."
+    assert _trim_spoken(long, max_words=10, max_sentences=2) == "One. Two."
+
+
 def test_fallback_rebuttal_normal_summary():
     result = _fallback_rebuttal(
         "The Great Wall is not visible from space with the naked eye. Astronauts confirmed this."
     )
-    assert result.startswith("Actually, that's not right.")
     assert "Great Wall" in result
+    assert result.endswith(".")
 
 
 def test_fallback_rebuttal_empty_summary():
-    assert _fallback_rebuttal("") == "Actually, that's not right."
+    assert _fallback_rebuttal("") == "That's not true."
 
 
 def test_fallback_rebuttal_no_answer_available():
-    assert _fallback_rebuttal("No answer available.") == "Actually, that's not right."
+    assert _fallback_rebuttal("No answer available.") == "That's not true."
 
 
 def test_fallback_rebuttal_single_sentence_no_dot():
     result = _fallback_rebuttal("Vaccines do not cause autism")
-    assert "Actually, that's not right." in result
+    assert "Vaccines do not cause autism" in result
 
 
 def test_fallback_rebuttal_ends_with_period():

@@ -397,28 +397,50 @@ def check_turn(transcript: str, timings: dict | None = None) -> dict | None:
 # Rebuttal generation + TTS playback
 # ---------------------------------------------------------------------------
 
+def _trim_spoken(text: str, max_words: int = 35, max_sentences: int = 2) -> str:
+    """Spoken rebuttal: up to N sentences, word cap — avoids TTS ramble."""
+    text = (text or "").strip()
+    if not text:
+        return "That's not true."
+    parts: list[str] = []
+    rest = text
+    for _ in range(max_sentences):
+        if not rest.strip():
+            break
+        chunk, _, rest = rest.partition(".")
+        sentence = chunk.strip()
+        if not sentence:
+            break
+        parts.append(sentence)
+        rest = rest.lstrip()
+    if not parts:
+        return "That's not true."
+    out = ". ".join(parts)
+    if not out.endswith((".", "!", "?")):
+        out += "."
+    words = out.split()
+    if len(words) > max_words:
+        out = " ".join(words[:max_words])
+        if out[-1] not in ".!?":
+            out += "."
+    return out
+
+
 def _fallback_rebuttal(summary: str) -> str:
-    """Build a safe fallback rebuttal from the first sentence of summary.
+    """Build a safe fallback rebuttal from the summary.
 
     Pure helper — unit-testable without any network calls.
     """
     if not summary or summary.strip() == "No answer available.":
-        return "Actually, that's not right."
-    # Take only the first sentence.
-    first_sentence = summary.split(".")[0].strip()
-    if not first_sentence:
-        return "Actually, that's not right."
-    return "Actually, that's not right. " + first_sentence + "."
+        return "That's not true."
+    return _trim_spoken(summary, max_words=30, max_sentences=2)
 
 
 def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
-    """Call Nebius to produce a short, punchy spoken rebuttal for a contradicted claim.
+    """Call Nebius to produce a spoken rebuttal for a contradicted claim.
 
     `barker_text` is the full text of the barker that just played. The rebuttal
-    must sound like a direct continuation of it — same speaker, same thought.
-    Returns ONE short, witty, fact-first sentence suitable for TTS — now that
-    interruptions fire fast, the barker is a quick interjection and the rebuttal
-    goes straight to the correction.
+    continues the same voice — 1-2 punchy sentences, fact-first (barker stays short).
     Falls back to _fallback_rebuttal if Nebius fails.
     """
     claim = verdict.get("claim", "")
@@ -430,13 +452,10 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
         if barker_text:
             system_prompt = (
                 "You are a confident, witty heckler who just interrupted a speaker. "
-                "You already said the opener (provided below) — the listener just heard it. "
-                "Now land the correction in ONE short spoken sentence that flows naturally "
-                "from where the opener left off, as if it is one continuous speech. Lead with "
-                "the fact — state what's actually true, with a touch of attitude. "
-                "Do NOT re-introduce yourself. Do NOT repeat the opener. Do NOT say 'Well actually' "
-                "or any similar transition. Keep it tight — one sentence, no rambling. "
-                "No markdown. No URLs. No Citations. Plain spoken text only."
+                "You already said the opener below — continue in the same breath. "
+                "Write 1-2 short spoken sentences (about 20-35 words total) that correct "
+                "the claim using the facts. Lead with what's actually true; a touch of attitude. "
+                "Do NOT repeat the opener. No 'well actually'. No markdown or URLs. Plain speech."
             )
             # TODO(security): claim and summary are LLM-derived from untrusted speaker input — sanitize
             # before production adversarial use.
@@ -447,11 +466,9 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
             )
         else:
             system_prompt = (
-                "You are a confident, witty heckler catching someone in a factual falsehood. "
-                "Write exactly ONE short, punchy spoken sentence that corrects the claim, leading "
-                "with the actual fact. A touch of attitude, but tight and fact-first — no rambling. "
-                "No preamble. No 'Well actually'. No markdown. No URLs. No citations. "
-                "Just the correction, plain text only, as if you are speaking aloud."
+                "You are a confident heckler correcting a false claim. "
+                "Write 1-2 short spoken sentences (about 20-35 words), fact-first. "
+                "No preamble. Plain speech only."
             )
             user_message = (
                 f"CLAIM (what they said): {claim}\n\n"
@@ -464,12 +481,12 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            temperature=0.7,
-            max_tokens=50,  # one fact-first sentence — keep it tight
+            temperature=0.65,
+            max_tokens=80,
         )
 
         raw = resp.choices[0].message.content or ""
-        return raw.strip()
+        return _trim_spoken(raw.strip())
 
     except Exception as exc:
         print(f"[WARN] generate_rebuttal failed ({exc}), using fallback", file=sys.stderr)
