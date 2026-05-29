@@ -28,16 +28,17 @@ _nebius_client: "OpenAI | None" = None
 _tavily_client: "TavilyClient | None" = None
 
 # Model selection, all overridable via env so slugs aren't hardcoded.
-# Tavily supplies the evidence; the judge mostly classifies that evidence as
-# contradicted/supported/mixed/unknown. Qwen3-30B-A3B (MoE, ~3B active params,
-# ~70 tok/s) matched the 70B's accuracy on the hard judge cases — including the
-# deictic-subject rule — while cutting the judge leg from ~1250ms to ~380ms.
-# Claim extraction is a mechanical "restate the checkable sentence" step, also
-# on Qwen (~205ms vs ~870ms for the 70B). The 70B remains the default rebuttal
-# writer, since that step is hidden behind the barker and not reaction-critical.
+# All three legs run on Qwen3-30B-A3B-Instruct-2507 (MoE, ~3B active params).
+# Tavily supplies the evidence; the judge mostly classifies it. Benchmarked vs
+# Llama-3.3-70B: matched judge accuracy on the hard cases (incl. the deictic-
+# subject rule) while cutting judge ~1250ms->~380ms and extraction ~870ms->~300ms.
+# For rebuttal-gen it produced finished, wittier output in ~730ms vs the 70B's
+# ~4s. NOTE: use the *-Instruct* (non-thinking) Qwen, NOT a *-Thinking* or
+# nemotron/nemotron-style reasoning model — those spend the whole token budget
+# reasoning and return EMPTY content under our short max_tokens, i.e. dead air.
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
-REBUTTAL_MODEL = os.environ.get("REBUTTAL_MODEL", "meta-llama/Llama-3.3-70B-Instruct")
+REBUTTAL_MODEL = os.environ.get("REBUTTAL_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507")
 
 
 def _get_nebius_client() -> "OpenAI":
