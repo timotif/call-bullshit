@@ -3,6 +3,7 @@
 No network calls — only parse_claim_response, score_verdict,
 parse_verdict_response, and _fallback_rebuttal are tested.
 """
+import os
 import pytest
 from factcheck import parse_claim_response, score_verdict, parse_verdict_response, _fallback_rebuttal
 
@@ -363,3 +364,228 @@ def test_play_audio_closes_stream_on_write_error():
             play_audio(_make_wav_bytes())
 
     mock_stream.__exit__.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# play_audio_stream — streaming chunked playback (slice: streaming TTS)
+# ---------------------------------------------------------------------------
+# play_audio_stream(chunk_iter, sample_rate, channels=1) opens ONE
+# RawOutputStream and writes each raw PCM chunk as it arrives. pcm output_format
+# means there is NO RIFF header to strip — chunks are already raw 16-bit LE PCM.
+# It is blocking I/O (RawOutputStream.write paces to real time) and the caller
+# runs it in an executor.
+
+
+def test_play_audio_stream_writes_every_chunk_in_order():
+    """All PCM chunks are written to the single output stream, in arrival order."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    chunks = [b"\x01\x02", b"\x03\x04", b"\x05\x06"]
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream) as ctor:
+        play_audio_stream(iter(chunks), sample_rate=24000)
+
+    # Exactly one stream opened for the whole rebuttal.
+    ctor.assert_called_once()
+    # Each chunk written once, in order.
+    mock_stream.write.assert_has_calls([call(c) for c in chunks])
+    assert mock_stream.write.call_count == len(chunks)
+
+
+def test_play_audio_stream_closes_stream_on_success():
+    """The output stream must be closed after draining all chunks."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        play_audio_stream(iter([b"\x00\x00"]), sample_rate=24000)
+
+    mock_stream.__exit__.assert_called_once()
+
+
+def test_play_audio_stream_closes_stream_on_write_error():
+    """If write() raises mid-stream (device error), the stream is still closed."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+    mock_stream.write.side_effect = RuntimeError("buffer overrun")
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        with pytest.raises(RuntimeError, match="buffer overrun"):
+            play_audio_stream(iter([b"\x00\x00", b"\x11\x11"]), sample_rate=24000)
+
+    mock_stream.__exit__.assert_called_once()
+
+
+def test_play_audio_stream_closes_stream_when_iterator_raises_midstream():
+    """A TTS stream can raise AFTER some audio has played. play_audio_stream must
+    let the error propagate but still close the device cleanly (no leak, no hang)."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    def failing_chunks():
+        yield b"\x00\x00"      # one good chunk plays
+        raise RuntimeError("tts stream died")
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        with pytest.raises(RuntimeError, match="tts stream died"):
+            play_audio_stream(failing_chunks(), sample_rate=24000)
+
+    # The good chunk was written before the failure.
+    mock_stream.write.assert_called_once_with(b"\x00\x00")
+    # Device closed despite the mid-stream failure.
+    mock_stream.__exit__.assert_called_once()
+
+
+def test_play_audio_stream_handles_empty_stream():
+    """An empty chunk iterator (e.g. TTS produced nothing) must not crash and
+    must still close the device cleanly."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        play_audio_stream(iter([]), sample_rate=24000)
+
+    mock_stream.write.assert_not_called()
+    mock_stream.__exit__.assert_called_once()
+
+
+def test_play_audio_stream_prebuffer_does_not_drop_or_reorder_chunks():
+    """A prebuffer (hold first N chunks before playing) guards against underrun
+    under slow/cold synthesis. It must change WHEN writes start, never WHICH
+    chunks are written nor their order — every chunk plays exactly once, in order,
+    even when fewer chunks arrive than the prebuffer target."""
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    chunks = [b"\x01\x01", b"\x02\x02", b"\x03\x03"]
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        # prebuffer larger than the number of chunks: must still flush all of them.
+        play_audio_stream(iter(chunks), sample_rate=24000, prebuffer_chunks=5)
+
+    mock_stream.write.assert_has_calls([call(c) for c in chunks])
+    assert mock_stream.write.call_count == len(chunks)
+
+
+def test_play_audio_stream_prebuffer_underrun_slow_delivery_does_not_crash():
+    """Simulated slow chunk delivery (a generator that sleeps between yields)
+    with a prebuffer must drain fully without crashing — the underrun guard."""
+    import time as _time
+    from factcheck import play_audio_stream
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    def slow_chunks():
+        for i in range(4):
+            _time.sleep(0.005)  # synthesis slower than playback would drain
+            yield bytes([i, i])
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        play_audio_stream(slow_chunks(), sample_rate=24000, prebuffer_chunks=2)
+
+    assert mock_stream.write.call_count == 4
+    mock_stream.__exit__.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# speak_stream — streaming Gradium TTS (slice: streaming TTS)
+# ---------------------------------------------------------------------------
+# speak_stream(text, voice_id) is an async generator yielding raw PCM chunks as
+# Gradium synthesizes them. It requests output_format="pcm" (no header handling)
+# and reuses one cached GradiumClient. Tests mock gradium entirely — no network.
+
+import asyncio
+
+
+class _FakeTTSStream:
+    """Stand-in for gradium TTSStream: async-iterates decoded PCM byte chunks."""
+    def __init__(self, chunks, sample_rate=24000):
+        self._chunks = chunks
+        self.sample_rate = sample_rate
+
+    async def iter_bytes(self):
+        for c in self._chunks:
+            yield c
+
+
+def _patch_gradium(fake_stream):
+    """Patch factcheck's cached gradium client so tts_stream returns fake_stream."""
+    fake_client = MagicMock()
+
+    async def _tts_stream(setup, text):
+        _tts_stream.setup = setup
+        _tts_stream.text = text
+        return fake_stream
+    fake_client.tts_stream = _tts_stream
+    return patch("factcheck._get_gradium_client", return_value=fake_client), _tts_stream
+
+
+def _drain(agen):
+    """Collect an async generator into a list, synchronously."""
+    async def run():
+        return [c async for c in agen]
+    return asyncio.run(run())
+
+
+def test_speak_stream_yields_pcm_chunks_in_order():
+    """speak_stream drains Gradium's iter_bytes, yielding each PCM chunk in order."""
+    from factcheck import speak_stream
+
+    fake = _FakeTTSStream([b"\xaa\xaa", b"\xbb\xbb", b"\xcc\xcc"])
+    ctx, _ = _patch_gradium(fake)
+    with ctx:
+        out = _drain(speak_stream("hello", voice_id="V123"))
+
+    assert out == [b"\xaa\xaa", b"\xbb\xbb", b"\xcc\xcc"]
+
+
+def test_speak_stream_requests_pcm_format():
+    """speak_stream must request output_format='pcm' (no RIFF header mid-stream)
+    and pass through the voice_id so the rebuttal matches the barker's voice."""
+    from factcheck import speak_stream
+
+    fake = _FakeTTSStream([b"\x00\x00"])
+    ctx, spy = _patch_gradium(fake)
+    with ctx:
+        _drain(speak_stream("hi", voice_id="VOICE9"))
+
+    assert spy.setup["output_format"] == "pcm"
+    assert spy.setup["voice_id"] == "VOICE9"
+    assert spy.text == "hi"
+
+
+def test_get_gradium_client_is_cached():
+    """The Gradium client is built once and reused — not per call (perf bug fix)."""
+    import factcheck
+
+    factcheck._gradium_client = None  # reset cache for a clean assertion
+    fake = MagicMock()
+    with patch.dict(os.environ, {"GRADIUM_API_KEY": "k"}), \
+         patch("gradium.client.GradiumClient", return_value=fake) as ctor:
+        c1 = factcheck._get_gradium_client()
+        c2 = factcheck._get_gradium_client()
+
+    assert c1 is c2
+    ctor.assert_called_once()
+    factcheck._gradium_client = None  # don't leak the fake into other tests

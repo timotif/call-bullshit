@@ -26,6 +26,7 @@ WAV_HEADER_BYTES = 44  # canonical RIFF/WAV header size; Gradium WAVs use standa
 
 _nebius_client: "OpenAI | None" = None
 _tavily_client: "TavilyClient | None" = None
+_gradium_client: "GradiumClient | None" = None
 
 # Model selection, all overridable via env so slugs aren't hardcoded.
 # All three legs run on Qwen3-30B-A3B-Instruct-2507 (MoE, ~3B active params).
@@ -64,6 +65,20 @@ def _get_tavily_client() -> "TavilyClient":
         from tavily import TavilyClient
         _tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
     return _tavily_client
+
+
+def _get_gradium_client() -> "GradiumClient":
+    """Lazily build and cache one GradiumClient (TTS).
+
+    speak()/speak_stream() previously built a fresh client on EVERY call, paying
+    connection/handshake setup per rebuttal — a per-call latency leak on the hot
+    path. Cache it like the Nebius/Tavily clients so it's created once.
+    """
+    global _gradium_client
+    if _gradium_client is None:
+        import gradium
+        _gradium_client = gradium.client.GradiumClient(api_key=os.environ["GRADIUM_API_KEY"])
+    return _gradium_client
 
 
 # ---------------------------------------------------------------------------
@@ -458,18 +473,58 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
 
 
 async def speak(text: str, voice_id: str = "POBHtemksfWQbng0") -> bytes:
-    """Call Gradium TTS and return WAV bytes.
+    """Call Gradium TTS (buffered) and return WAV bytes.
 
-    Async because client.tts() is a coroutine.
+    Async because client.tts() is a coroutine. Retained for back-compat / any
+    non-streaming caller; the live rebuttal path now uses speak_stream() so it
+    can start playing on the first chunk instead of after the whole WAV. Uses
+    the cached client (no per-call connection churn).
     """
-    import gradium
-
-    client = gradium.client.GradiumClient(api_key=os.environ["GRADIUM_API_KEY"])
+    client = _get_gradium_client()
     result = await client.tts(
         setup={"voice_id": voice_id, "output_format": "wav"},
         text=text,
     )
     return result.raw_data
+
+
+async def open_tts_stream(text: str, voice_id: str = "POBHtemksfWQbng0"):
+    """Open a streaming Gradium TTS request and return the raw TTSStream.
+
+    The TTSStream exposes `.sample_rate` (the device rate to open playback at)
+    and `.iter_bytes()` (async iterator of raw 16-bit signed LE PCM chunks at
+    24 kHz mono — matches main.SAMPLE_RATE — already base64-DECODED by the SDK).
+    We request output_format="pcm", NOT "wav", so there is no per-chunk RIFF
+    header to strip mid-stream (only wav's first chunk carries the 44-byte
+    header — fragile). The point of streaming is time-to-first-chunk (~606ms
+    warm) vs the buffered tts() (~3.7s): playback can begin on chunk one.
+
+    Use this when you need the sample rate (e.g. to open the output device);
+    use speak_stream() when you only need the chunk iterator. Uses the cached
+    client (no per-call connection churn).
+    """
+    client = _get_gradium_client()
+    return await client.tts_stream(
+        setup={"voice_id": voice_id, "output_format": "pcm"},
+        text=text,
+    )
+
+
+async def speak_stream(text: str, voice_id: str = "POBHtemksfWQbng0"):
+    """Stream Gradium TTS, yielding raw PCM chunks as synthesis produces them.
+
+    Contract: this is an ASYNC GENERATOR. The caller does
+    `async for chunk in speak_stream(...)` and each chunk is raw 16-bit signed
+    LE PCM at 24 kHz mono. Thin wrapper over open_tts_stream for callers that
+    don't need the sample rate.
+
+    Errors from Gradium propagate out of the generator (e.g. a stream that dies
+    mid-synthesis after some audio has played); the playback drainer closes the
+    device and the turn caller resets `speaking`.
+    """
+    stream = await open_tts_stream(text, voice_id=voice_id)
+    async for chunk in stream.iter_bytes():
+        yield chunk
 
 
 def play_audio(wav_bytes: bytes) -> None:
@@ -478,6 +533,9 @@ def play_audio(wav_bytes: bytes) -> None:
     Reads sample rate and channel count from the RIFF header, then reads PCM
     payload starting at byte 44 (canonical WAV header size) to work around
     Gradium's unreliable RIFF size field.
+
+    Retained for the buffered/WAV path (barkers still load on-disk WAVs).
+    The streaming rebuttal path uses play_audio_stream instead.
     """
     import sounddevice as sd
 
@@ -489,6 +547,51 @@ def play_audio(wav_bytes: bytes) -> None:
 
     with sd.RawOutputStream(samplerate=sr, channels=ch, dtype="int16") as out:
         out.write(pcm)
+
+
+def play_audio_stream(chunk_iter, sample_rate: int, channels: int = 1, prebuffer_chunks: int = 0) -> None:
+    """Drain raw PCM chunks to one output stream, writing each as it arrives.
+
+    `chunk_iter` is any (sync) iterable yielding raw 16-bit signed LE PCM bytes
+    — the rebuttal path requests output_format="pcm" precisely so there is NO
+    per-chunk RIFF header to strip (unlike the buffered WAV path). Each
+    RawOutputStream.write() BLOCKS until the device accepts the bytes, so it
+    paces playback to real time while later chunks are still being synthesized
+    upstream; that blocking is also why the caller runs this in an executor.
+
+    `prebuffer_chunks` holds the first N chunks before the first write, so a
+    slow/cold synthesis round can't underrun the device (audible gap/glitch)
+    the instant playback outpaces delivery. Once primed, writes resume one
+    chunk at a time. In the live sequencing the barker plays during synthesis
+    and is itself a natural prebuffer, so a small N (0-2) is plenty here; the
+    knob exists so the cold/slow round — not just the warm one — is covered.
+    The prebuffer only shifts WHEN the first write happens; it never drops,
+    reorders, or duplicates chunks, and a stream shorter than N still flushes
+    fully.
+
+    Resource safety: the `with` opens exactly one stream for the whole rebuttal
+    and closes it on the way out — on normal completion, on a write() device
+    error, AND when `chunk_iter` itself raises mid-stream (a TTS stream can die
+    after some audio has played). We deliberately let the exception propagate so
+    the turn's caller can reset `speaking` and recover, but the device is never
+    leaked. An empty iterator simply opens-and-closes the stream (no audio).
+    """
+    import sounddevice as sd
+
+    it = iter(chunk_iter)
+    with sd.RawOutputStream(samplerate=sample_rate, channels=channels, dtype="int16") as out:
+        # Prime the prebuffer: pull up to N chunks before the first write so a
+        # slow first round doesn't underrun. A short stream just primes fully.
+        primed: list[bytes] = []
+        for chunk in it:
+            primed.append(chunk)
+            if len(primed) >= prebuffer_chunks:
+                break
+        for chunk in primed:
+            out.write(chunk)
+        # Stream the remainder one chunk at a time; write() paces to real time.
+        for chunk in it:
+            out.write(chunk)
 
 
 # ---------------------------------------------------------------------------

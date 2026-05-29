@@ -143,3 +143,109 @@ def test_pick_barker_fallback_pool_also_randomizes():
     files = [p["file"] for p in picks]
     for a, b in zip(files, files[1:]):
         assert a != b
+
+
+# ---------------------------------------------------------------------------
+# prepare_rebuttal — streaming TTS contract (slice: streaming TTS)
+# ---------------------------------------------------------------------------
+# prepare_rebuttal now starts a streaming TTS and returns a RebuttalStream whose
+# .chunks() yields the PCM chunks for the playback drainer. It must:
+#   - generate the rebuttal text (Nebius) off-thread,
+#   - start speak_stream and record `tts` as TIME-TO-FIRST-CHUNK (not full TTS),
+#   - preserve timing keys rebuttal_start / rebuttal_gen / tts / rebuttal_end,
+#   - expose the text, the device sample rate, and the ordered chunk stream.
+# speak_stream + generate_rebuttal are the external boundaries — patched here.
+
+import asyncio
+import factcheck
+
+
+class _FakeTTSStream:
+    def __init__(self, chunks, sample_rate=24000, fail_after=None):
+        self._chunks = chunks
+        self.sample_rate = sample_rate
+        self._fail_after = fail_after
+
+    async def iter_bytes(self):
+        for i, c in enumerate(self._chunks):
+            if self._fail_after is not None and i >= self._fail_after:
+                raise RuntimeError("tts stream died")
+            yield c
+
+
+def _fake_speak_stream(chunks, sample_rate=24000, fail_after=None):
+    """Build a speak_stream replacement (async generator) over canned chunks.
+
+    Mirrors factcheck.speak_stream: it must expose sample_rate to prepare_rebuttal.
+    prepare_rebuttal reads sample_rate via the underlying TTSStream, so we route
+    through speak_stream's real shape by patching factcheck._get_gradium_client.
+    """
+    fake_stream = _FakeTTSStream(chunks, sample_rate, fail_after)
+    fake_client = mock.MagicMock()
+
+    async def _tts_stream(setup, text):
+        return fake_stream
+    fake_client.tts_stream = _tts_stream
+    return fake_client
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+def test_prepare_rebuttal_streams_chunks_in_order():
+    """The returned stream yields exactly the PCM chunks Gradium produced, in order."""
+    chunks = [b"\x01\x01", b"\x02\x02", b"\x03\x03"]
+    fake_client = _fake_speak_stream(chunks)
+
+    with mock.patch.object(main, "generate_rebuttal", return_value="You're wrong."), \
+         mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+        rs = _run(main.prepare_rebuttal({"claim": "c", "summary": "s"}))
+        drained = list(rs.chunks())
+
+    assert rs.text == "You're wrong."
+    assert drained == chunks
+
+
+def test_prepare_rebuttal_reports_sample_rate():
+    """The stream exposes the device sample rate from Gradium (for the drainer)."""
+    fake_client = _fake_speak_stream([b"\x00\x00"], sample_rate=24000)
+    with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+         mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+        rs = _run(main.prepare_rebuttal({"claim": "c", "summary": "s"}))
+        list(rs.chunks())
+    assert rs.sample_rate == 24000
+
+
+def test_prepare_rebuttal_tts_measures_time_to_first_chunk():
+    """`tts` timing must measure time-to-first-chunk, not full synthesis — this
+    is what calibration keys off to shrink the barker. We also expose a dedicated
+    first-chunk key and preserve the gen / start / end timing keys."""
+    chunks = [b"\x00\x00", b"\x11\x11"]
+    fake_client = _fake_speak_stream(chunks)
+    timings = {}
+    with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+         mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+        rs = _run(main.prepare_rebuttal({"claim": "c", "summary": "s"}, timings))
+        list(rs.chunks())
+
+    for key in ("rebuttal_start", "rebuttal_gen", "tts", "rebuttal_end", "tts_first_chunk"):
+        assert key in timings, f"missing timing key {key}"
+    # time-to-first-chunk is recorded and non-negative.
+    assert timings["tts_first_chunk"] >= 0.0
+    assert timings["tts"] == pytest.approx(timings["tts_first_chunk"])
+
+
+def test_prepare_rebuttal_midstream_failure_propagates_to_drainer():
+    """A stream that dies after the first chunk must surface the error to the
+    drainer (so the turn can stop cleanly) — the first chunk still drains."""
+    fake_client = _fake_speak_stream([b"\x00\x00", b"\x11\x11"], fail_after=1)
+    with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+         mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+        rs = _run(main.prepare_rebuttal({"claim": "c", "summary": "s"}))
+        got = []
+        with pytest.raises(RuntimeError, match="tts stream died"):
+            for c in rs.chunks():
+                got.append(c)
+
+    assert got == [b"\x00\x00"]  # the one good chunk drained before the failure
