@@ -1,10 +1,37 @@
 # Call Bullshit
 
-A real-time live fact-check voice agent. It listens to a speaker, extracts
-checkable claims on the fly, searches the web for evidence, and **interrupts
-out loud** the moment it catches a lie.
+**Real-time voice fact-checker — listens while you speak, searches the web, and talks over you when you're wrong.**
 
-**Built in a 5-hour hackathon in Berlin (29 May 2026), hosted by [Nebius](https://nebius.com/), [Tavily](https://tavily.com/), and [Gradium](https://gradium.ai/).** The stack uses all three hosts' APIs: Gradium for hearing and speaking, Tavily for live web evidence, Nebius for the LLM legs (claim extraction, verdict judging, rebuttal copy).
+Warm path: **~2 s** from a `contradicted` verdict to hearing the correction — a short ~1–2 s opener plus streaming TTS that starts on the first PCM chunk (not a long canned ramble waiting for a full WAV).
+
+Built in a **5-hour hackathon** in Berlin (29 May 2026) with [Nebius](https://nebius.com/), [Tavily](https://tavily.com/), and [Gradium](https://gradium.ai/). Gradium for hearing and speaking, Tavily for live web evidence, Nebius for the LLM legs (claim extraction, verdict judging, rebuttal copy).
+
+---
+
+## Demo
+
+<!-- After you record: commit assets/demo.mp4, or replace the link with a YouTube / Release URL. -->
+
+**[Watch the demo](./assets/demo.mp4)** — *add `assets/demo.mp4` when ready (link works once the file is in the repo)*
+
+Speak a checkable falsehood into the mic. The agent fact-checks **while you are still talking**, then interrupts with a short opener and a fact-backed correction when evidence says the claim is wrong. Run the [live dashboard](http://localhost:8765) in a browser tab to show the transcript, verdict feed, BS meter, and latency strip.
+
+**Good demo beats (~20–30 s):** one obvious lie → `contradicted` on the dashboard → barker → rebuttal. Optional: meter rising before the heckle fires.
+
+---
+
+## Quick start
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # GRADIUM_API_KEY, NEBIUS_API_KEY, TAVILY_API_KEY
+
+python gen_barkers.py         # one-time: generate barker WAVs (includes ~1–2 s tier)
+python main.py                # listen — dashboard on http://localhost:8765
+```
+
+First run runs a one-time warm-up calibration (~5 s); then speak. Use `*-Instruct*` models only — not `*-Thinking*` (see [Configuration](#configuration)).
 
 ---
 
@@ -37,7 +64,7 @@ out loud** the moment it catches a lie.
   📊 Live Dashboard              BS meter · live transcript · verdict feed · latency strip
 ```
 
-Open `slide.html` in a browser for the visual architecture diagram.
+Open [`slide.html`](slide.html) for a visual architecture slide.
 
 ---
 
@@ -45,61 +72,27 @@ Open `slide.html` in a browser for the visual architecture diagram.
 
 | Feature | What it does |
 |---------|----------------|
-| **Mid-speech fact-checks** | Dispatches a new check every ~15 words (`LIVE_CHECK_WORDS`) so a verdict can land before the speaker finishes. |
+| **Mid-speech fact-checks** | New check every ~15 words (`LIVE_CHECK_WORDS`) so a verdict can land before the speaker finishes. |
 | **Verdict-driven heckle** | Fires on `contradicted` with confidence ≥ 0.5 — not LLM whim. The BS meter is a **dashboard visual** (rises on dubious verdicts, resets after a heckle). |
-| **Barker-as-latency-budget** | A pre-generated opener plays while Nebius + Gradium prepare the rebuttal. Barker length is sized to cover **gen + time-to-first TTS chunk**, not full synthesis. |
-| **Warm startup calibration** | Two mock rebuttal rounds at launch: discard the cold one, size barkers from the warm **first-chunk** latency (+ margin). Concurrent `warm_up_verdict_path()` hides Nebius cold-start on the first real claim. |
-| **Full Tavily evidence to judge** | Fetches up to 5 results (`TAVILY_MAX_RESULTS`); every snippet is fed to the judge (capped at `SNIPPET_CHARS` each). Latency is flat across 3–5 results. |
-| **Fast MoE on all LLM legs** | Default `Qwen/Qwen3-30B-A3B-Instruct-2507` for extract, judge, and rebuttal (~3× faster than the original Llama-70B path). Env-overridable per leg. |
-| **Streaming rebuttal TTS** | `tts_stream` + chunked playback — audio starts on the first PCM chunk (~600 ms warm) instead of waiting for a full WAV. |
-| **Heuristic fallback** | If `judge_verdict` fails, `score_verdict` derives a verdict from Tavily's answer string without a second LLM call. |
-| **Live dashboard** | WebSocket UI: BS meter, rolling transcript, verdict cards, red flash on heckle, per-stage latency breakdown. |
+| **Barker-as-latency-budget** | ~1–2 s openers cover **gen + time-to-first TTS chunk** (~1.2 s warm); longer tiers only when calibration sees a slow round. |
+| **Warm startup calibration** | Two mock rounds at launch: discard the cold one, size barkers from warm **first-chunk** latency (+ margin). `warm_up_verdict_path()` hides Nebius cold-start on the first real claim. |
+| **Full Tavily evidence to judge** | Up to 5 results (`TAVILY_MAX_RESULTS`); every snippet to the judge (`SNIPPET_CHARS` each). Latency is flat across 3–5 results. |
+| **Fast MoE on all LLM legs** | Default `Qwen/Qwen3-30B-A3B-Instruct-2507` (~3× faster than the original Llama-70B path). Env-overridable per leg. |
+| **Streaming rebuttal TTS** | `tts_stream` + chunked playback — first PCM chunk ~600 ms warm, not a full WAV. |
+| **Heuristic fallback** | If `judge_verdict` fails, `score_verdict` uses Tavily's answer string — no second LLM call. |
+| **Live dashboard** | BS meter, rolling transcript, verdict cards, heckle flash, per-stage latency. |
 
 **Key design choices:**
 
 - **Code-driven loop** — Python owns when to search, judge, and interrupt; the LLM does not decide to "call a tool."
-- **Evidence-grounded** — Tavily supplies facts; the Nebius judge only classifies that evidence (with a heuristic fallback if the judge call fails).
-- **Do not use reasoning / `*-Thinking*` models** for the three LLM legs — they exhaust `max_tokens` on internal traces and return empty TTS input.
+- **Evidence-grounded** — Tavily supplies facts; the Nebius judge only classifies that evidence.
+- **Do not use `*-Thinking*` / reasoning models** on the three LLM legs — they exhaust `max_tokens` on internal traces and return empty TTS input.
 
 ---
 
-## Partners (hackathon hosts)
+## Configuration
 
-| Service | Role | Links |
-|---------|------|--------|
-| **Gradium** | Streaming STT (semantic VAD) + streaming TTS (10 voices for barkers and rebuttals) | [gradium.ai](https://gradium.ai/) · [@gradium-ai](https://github.com/gradium-ai) |
-| **Nebius** | LLM inference — claim extraction, verdict judging, rebuttal generation (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) | [nebius.com](https://nebius.com/) · [@nebius](https://github.com/nebius) |
-| **Tavily** | Real-time web search — evidence and synthesized answer for the judge | [tavily.com](https://tavily.com/) · [@tavily-ai](https://github.com/tavily-ai) |
-
-Python SDKs in this repo: [`gradium`](https://pypi.org/project/gradium/), [`tavily-python`](https://github.com/tavily-ai/tavily-python), [`openai`](https://github.com/openai/openai-python) (Nebius-compatible API).
-
----
-
-## Files
-
-```
-main.py            entry point — mic loop, STT, parallel checks, barker/rebuttal pipeline, dashboard WS
-factcheck.py       fact-checking brain — claim extraction, Tavily, judge, rebuttal, TTS adapters
-gen_barkers.py     one-shot script to generate the barker WAV library
-dashboard.html     live browser dashboard (WebSocket)
-slide.html         architecture slide for demos
-test_factcheck.py  unit tests for pure functions (no network)
-test_main.py       unit tests for calibration, streaming rebuttal prep, barker pick
-```
-
-> `barkers/` is generated locally by `gen_barkers.py` and not checked in.
-
----
-
-## Setup
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env   # fill in API keys
-```
-
-Required env vars:
+Required in `.env`:
 
 ```
 GRADIUM_API_KEY=...
@@ -107,57 +100,50 @@ NEBIUS_API_KEY=...
 TAVILY_API_KEY=...
 ```
 
-Optional tuning (see `.env.example` for defaults):
+Common tuning (full list in [`.env.example`](.env.example)):
 
-```
-# Models (all three legs; use *-Instruct*, not *-Thinking*)
-JUDGE_MODEL=...
-EXTRACT_MODEL=...
-REBUTTAL_MODEL=...
-
-# Tavily → judge
-TAVILY_MAX_RESULTS=5
-SNIPPET_CHARS=400
-
-# STT / live checks
-VAD_THRESHOLD=0.7
-VAD_STEPS_TO_END=8
-LIVE_CHECK_WORDS=15
-LIVE_CHECK_MIN_WORDS=10
-
-# BS meter (visual only; interrupt is verdict-driven)
-BS_THRESHOLD=1.0
-BS_DECAY=0.3
-
-# Barker sizing
-CALIBRATION_MARGIN=1.5
-CALIBRATION_MAX=17.0
-CALIBRATE=1              # 0 = skip startup calibration
-
-# Streaming TTS playback
-TTS_PREBUFFER_CHUNKS=2
-MAX_REBUTTAL_SECONDS=30
-
-DASHBOARD_PORT=8765
-INPUT_DEVICE=            # substring match (e.g. "JBL") or device index
-DEBUG=0
-```
+| Area | Variables |
+|------|-----------|
+| Models | `JUDGE_MODEL`, `EXTRACT_MODEL`, `REBUTTAL_MODEL` |
+| Tavily → judge | `TAVILY_MAX_RESULTS`, `SNIPPET_CHARS` |
+| Live checks | `LIVE_CHECK_WORDS`, `LIVE_CHECK_MIN_WORDS`, `VAD_*` |
+| BS meter (visual) | `BS_THRESHOLD`, `BS_DECAY` |
+| Barker sizing | `CALIBRATE`, `CALIBRATION_MARGIN`, `CALIBRATION_MAX` |
+| Streaming playback | `TTS_PREBUFFER_CHUNKS`, `MAX_REBUTTAL_SECONDS` |
+| Other | `DASHBOARD_PORT`, `INPUT_DEVICE`, `DEBUG` |
 
 ---
 
-## Run
+## Partners (hackathon hosts)
 
-```bash
-# Generate barker audio (one-time)
-python gen_barkers.py
+| Service | Role | Links |
+|---------|------|--------|
+| **Gradium** | Streaming STT (semantic VAD) + streaming TTS (10 voices) | [gradium.ai](https://gradium.ai/) · [@gradium-ai](https://github.com/gradium-ai) |
+| **Nebius** | Claim extraction, verdict judging, rebuttal (`Qwen/Qwen3-30B-A3B-Instruct-2507`) | [nebius.com](https://nebius.com/) · [@nebius](https://github.com/nebius) |
+| **Tavily** | Real-time search + synthesized answer for the judge | [tavily.com](https://tavily.com/) · [@tavily-ai](https://github.com/tavily-ai) |
 
-# Start the agent (serves dashboard on DASHBOARD_PORT)
-python main.py
+SDKs: [`gradium`](https://pypi.org/project/gradium/), [`tavily-python`](https://github.com/tavily-ai/tavily-python), [`openai`](https://github.com/openai/openai-python) (Nebius-compatible).
+
+---
+
+## Project layout
+
+```
+main.py            mic loop, STT, parallel checks, interrupt pipeline, dashboard WS
+factcheck.py       claim extraction, Tavily, judge, rebuttal, TTS adapters
+gen_barkers.py     generate barker WAV library (one-time)
+dashboard.html     live dashboard
+slide.html         architecture slide
+test_factcheck.py  unit tests (no network)
+test_main.py       calibration, streaming rebuttal prep, barker pick
+assets/demo.mp4    optional — drop your demo video here
 ```
 
-Open `http://localhost:8765` in a browser to watch the live dashboard.
+> `barkers/` is generated by `gen_barkers.py` and not checked in.
 
-Run tests:
+---
+
+## Tests
 
 ```bash
 pytest test_factcheck.py test_main.py -v
@@ -171,12 +157,7 @@ pytest test_factcheck.py test_main.py -v
 
 ## Contributing
 
-Built in a weekend hackathon window — not a maintained product, but fixes and ideas are welcome:
-
-- [Open an issue](https://github.com/timotif/call-bullshit/issues) for bugs or questions
-- [Open a pull request](https://github.com/timotif/call-bullshit/pulls) for small, focused changes
-
-No formal contribution guide; keep PRs scoped and runnable (`pytest` passes).
+Built in a **5-hour hackathon** — not a maintained product, but fixes and ideas are welcome ([issues](https://github.com/timotif/call-bullshit/issues) · [PRs](https://github.com/timotif/call-bullshit/pulls)). Keep PRs scoped; `pytest` should pass.
 
 ---
 
