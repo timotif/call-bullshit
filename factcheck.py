@@ -491,9 +491,11 @@ async def speak(text: str, voice_id: str = "POBHtemksfWQbng0") -> bytes:
 async def open_tts_stream(text: str, voice_id: str = "POBHtemksfWQbng0"):
     """Open a streaming Gradium TTS request and return the raw TTSStream.
 
-    The TTSStream exposes `.sample_rate` (the device rate to open playback at)
-    and `.iter_bytes()` (async iterator of raw 16-bit signed LE PCM chunks at
-    24 kHz mono — matches main.SAMPLE_RATE — already base64-DECODED by the SDK).
+    The TTSStream exposes `.sample_rate` (the device rate to open playback at —
+    the caller MUST use this, NOT a hardcoded rate: the live endpoint has been
+    observed at 48 kHz; fall back to main.SAMPLE_RATE only if it is unset) and
+    `.iter_bytes()` (async iterator of raw 16-bit signed LE PCM chunks, mono,
+    at `.sample_rate` — already base64-DECODED by the SDK).
     We request output_format="pcm", NOT "wav", so there is no per-chunk RIFF
     header to strip mid-stream (only wav's first chunk carries the 44-byte
     header — fragile). The point of streaming is time-to-first-chunk (~606ms
@@ -515,8 +517,13 @@ async def speak_stream(text: str, voice_id: str = "POBHtemksfWQbng0"):
 
     Contract: this is an ASYNC GENERATOR. The caller does
     `async for chunk in speak_stream(...)` and each chunk is raw 16-bit signed
-    LE PCM at 24 kHz mono. Thin wrapper over open_tts_stream for callers that
-    don't need the sample rate.
+    LE PCM, mono, at the stream's `.sample_rate` (the live endpoint has been
+    observed at 48 kHz; do NOT assume 24 kHz). Thin wrapper over open_tts_stream
+    for callers that don't need the sample rate.
+
+    NOTE: main.py's live rebuttal path uses open_tts_stream directly (it needs
+    the sample rate to open the output device); this wrapper is kept as a
+    convenience for external callers that only want the chunk iterator.
 
     Errors from Gradium propagate out of the generator (e.g. a stream that dies
     mid-synthesis after some audio has played); the playback drainer closes the

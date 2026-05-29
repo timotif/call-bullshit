@@ -161,31 +161,43 @@ import factcheck
 
 
 class _FakeTTSStream:
-    def __init__(self, chunks, sample_rate=24000, fail_after=None):
+    def __init__(self, chunks, sample_rate=24000, fail_after=None, block_after=None):
         self._chunks = chunks
         self.sample_rate = sample_rate
         self._fail_after = fail_after
+        # If set, iter_bytes() awaits forever after yielding `block_after` chunks
+        # (models a stream that stalls mid-synthesis — used to test cancellation).
+        self._block_after = block_after
+        self.closed = False  # set True if the iter_bytes generator is aclose()'d
 
     async def iter_bytes(self):
-        for i, c in enumerate(self._chunks):
-            if self._fail_after is not None and i >= self._fail_after:
-                raise RuntimeError("tts stream died")
-            yield c
+        try:
+            for i, c in enumerate(self._chunks):
+                if self._fail_after is not None and i >= self._fail_after:
+                    raise RuntimeError("tts stream died")
+                if self._block_after is not None and i >= self._block_after:
+                    await asyncio.Event().wait()  # block until cancelled/closed
+                yield c
+        finally:
+            # GeneratorExit (from aclose) or normal exhaustion both land here.
+            self.closed = True
 
 
-def _fake_speak_stream(chunks, sample_rate=24000, fail_after=None):
+def _fake_speak_stream(chunks, sample_rate=24000, fail_after=None, block_after=None):
     """Build a speak_stream replacement (async generator) over canned chunks.
 
     Mirrors factcheck.speak_stream: it must expose sample_rate to prepare_rebuttal.
     prepare_rebuttal reads sample_rate via the underlying TTSStream, so we route
     through speak_stream's real shape by patching factcheck._get_gradium_client.
+    Returns (fake_client, fake_stream) so tests can assert close behaviour.
     """
-    fake_stream = _FakeTTSStream(chunks, sample_rate, fail_after)
+    fake_stream = _FakeTTSStream(chunks, sample_rate, fail_after, block_after)
     fake_client = mock.MagicMock()
 
     async def _tts_stream(setup, text):
         return fake_stream
     fake_client.tts_stream = _tts_stream
+    fake_client._fake_stream = fake_stream
     return fake_client
 
 
@@ -249,3 +261,77 @@ def test_prepare_rebuttal_midstream_failure_propagates_to_drainer():
                 got.append(c)
 
     assert got == [b"\x00\x00"]  # the one good chunk drained before the failure
+
+
+# ---------------------------------------------------------------------------
+# Cancellation / cleanup contract (review findings C1/C3/C4)
+# ---------------------------------------------------------------------------
+
+def test_prepare_rebuttal_empty_tts_stream_aborts_gracefully():
+    """T-a: a zero-chunk TTS stream must NOT raise out of the turn path.
+
+    Gradium has been observed returning zero audio chunks (ADR 0002, reasoning
+    models). prepare_rebuttal must treat that as 'no audio', close the stream,
+    and return a RebuttalStream whose chunks() yields nothing (the turn skips
+    playback) instead of letting StopAsyncIteration escape and crash the session.
+    """
+    fake_client = _fake_speak_stream([])  # zero chunks
+    with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+         mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+        rs = _run(main.prepare_rebuttal({"claim": "c", "summary": "s"}))
+        assert list(rs.chunks()) == []  # no audio, drains immediately, no raise
+    assert fake_client._fake_stream.closed  # the empty stream was closed
+
+
+def test_prepare_rebuttal_cancel_mid_first_chunk_cleans_up():
+    """T-b: cancelling prepare_rebuttal while it blocks on the first chunk must
+    close the underlying stream/iterator and leave no orphaned pump task.
+
+    We model a stream that never yields its first chunk (blocks forever). The
+    awaiting task is cancelled; prepare_rebuttal must close the chunk iterator
+    (so the socket is released) and propagate CancelledError. No pump task is
+    created in this case (we never got past the first chunk)."""
+    fake_client = _fake_speak_stream([b"\x00\x00"], block_after=0)  # blocks before chunk 0
+
+    async def scenario():
+        with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+             mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+            task = asyncio.create_task(
+                main.prepare_rebuttal({"claim": "c", "summary": "s"})
+            )
+            await asyncio.sleep(0.05)  # let it reach the blocking __anext__
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0.01)  # allow aclose to finish
+
+    _run(scenario())
+    assert fake_client._fake_stream.closed  # stream closed on cancellation
+
+
+def test_rebuttal_stream_cancel_pump_after_first_chunk():
+    """T-b (post-first-chunk): once the pump is running, cancel_pump() must
+    cancel the pump task AND close the underlying TTS stream/iterator."""
+    fake_client = _fake_speak_stream([b"\x00\x00"], block_after=1)  # 1 chunk then block
+
+    async def scenario():
+        with mock.patch.object(main, "generate_rebuttal", return_value="x"), \
+             mock.patch.object(factcheck, "_get_gradium_client", return_value=fake_client):
+            rs = await main.prepare_rebuttal({"claim": "c", "summary": "s"})
+            assert rs._pump_task is not None and not rs._pump_task.done()
+            await rs.cancel_pump()
+            assert rs._pump_task.cancelled() or rs._pump_task.done()
+        return rs
+
+    rs = _run(scenario())
+    assert fake_client._fake_stream.closed  # stream closed by cancel_pump
+
+
+def test_chunks_drainer_unblocks_via_timeout(monkeypatch):
+    """T-c: if the pump dies without posting the DONE sentinel, chunks() must
+    stop draining via a timeout instead of blocking the executor thread forever."""
+    monkeypatch.setattr(main, "MAX_REBUTTAL_SECONDS", 0.05)
+    rs = main.RebuttalStream("x", 24000)
+    rs._put(b"\x00\x00")  # one chunk, then NOTHING (no sentinel, simulating a dead pump)
+    got = list(rs.chunks())  # must return (via timeout), not hang
+    assert got == [b"\x00\x00"]

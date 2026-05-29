@@ -486,24 +486,33 @@ def test_play_audio_stream_prebuffer_does_not_drop_or_reorder_chunks():
     assert mock_stream.write.call_count == len(chunks)
 
 
-def test_play_audio_stream_prebuffer_underrun_slow_delivery_does_not_crash():
-    """Simulated slow chunk delivery (a generator that sleeps between yields)
-    with a prebuffer must drain fully without crashing — the underrun guard."""
-    import time as _time
+def test_play_audio_stream_prebuffer_gates_first_write_until_primed():
+    """The prebuffer must HOLD the first N chunks before any write: no write may
+    happen until the Nth chunk has been pulled. We record write.call_count at
+    each yield to assert the gate, then assert full ordered drain + close."""
     from factcheck import play_audio_stream
 
     mock_stream = MagicMock()
     mock_stream.__enter__ = MagicMock(return_value=mock_stream)
     mock_stream.__exit__ = MagicMock(return_value=False)
 
-    def slow_chunks():
+    writes_seen_at_yield: list[int] = []  # write.call_count observed as each chunk is pulled
+
+    def chunks():
         for i in range(4):
-            _time.sleep(0.005)  # synthesis slower than playback would drain
+            writes_seen_at_yield.append(mock_stream.write.call_count)
             yield bytes([i, i])
 
     with patch("sounddevice.RawOutputStream", return_value=mock_stream):
-        play_audio_stream(slow_chunks(), sample_rate=24000, prebuffer_chunks=2)
+        play_audio_stream(chunks(), sample_rate=24000, prebuffer_chunks=2)
 
+    # When chunks 0 and 1 are pulled (priming the prebuffer of 2), NO write has
+    # happened yet — the gate held. Writes only begin after the prebuffer fills.
+    assert writes_seen_at_yield[0] == 0
+    assert writes_seen_at_yield[1] == 0
+    # Ordered, complete drain and exactly one stream close.
+    written = [c.args[0] for c in mock_stream.write.call_args_list]
+    assert written == [bytes([i, i]) for i in range(4)]
     assert mock_stream.write.call_count == 4
     mock_stream.__exit__.assert_called_once()
 
