@@ -210,9 +210,16 @@ async def prepare_rebuttal(verdict: dict, timings: dict | None = None, voice_id:
 
 
 async def calibrate_prep_latency() -> float:
-    """Mock one rebuttal (gen + TTS) at startup to size barkers for this session.
+    """Mock two rebuttals (gen + TTS) at startup to size barkers for this session.
 
-    Returns the prep latency budget in seconds: measured (gen + tts) + margin.
+    The FIRST round is a throwaway warm-up: the rebuttal model (70B) and Gradium
+    TTS both pay a cold-start on their first request after idle, so measuring a
+    cold round would over-estimate the budget and pick barkers longer than real
+    fires need. We discard the first round and calibrate on the SECOND (warm) one,
+    so the budget reflects steady-state and CALIBRATION_MARGIN only covers genuine
+    per-call variance.
+
+    Returns the prep latency budget in seconds: measured warm (gen + tts) + margin.
     Returns 0.0 if calibration is disabled or fails — play_barker then falls back
     to the shortest barker (budget=0) or, on a real fire, the longest cover.
     """
@@ -224,11 +231,12 @@ async def calibrate_prep_latency() -> float:
         "confidence": 0.9,
         "summary": "It is not visible from space with the naked eye; this is a common myth.",
     }
-    print("Calibrating rebuttal latency (one mock round)...", flush=True)
+    print("Calibrating rebuttal latency (warm-up + measured round)...", flush=True)
     emit("status", {"phase": "calibrating", "text": "Calibrating latency…"})
     timings: dict[str, float] = {}
     try:
-        await prepare_rebuttal(mock_verdict, timings)
+        await prepare_rebuttal(mock_verdict)        # cold throwaway: warms gen + TTS
+        await prepare_rebuttal(mock_verdict, timings)  # warm: this is what we measure
     except Exception as exc:
         print(f"[WARN] calibration failed ({exc}); using longest barker", flush=True)
         emit("status", {"phase": "calibration_failed", "text": f"Calibration failed: {exc}"})
