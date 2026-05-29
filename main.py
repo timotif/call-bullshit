@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import queue
+import sys
 import time
 import wave
 from pathlib import Path
@@ -24,6 +25,12 @@ from factcheck import check_turn, generate_rebuttal, play_audio, speak
 
 load_dotenv()
 
+_REQUIRED_ENV = ("GRADIUM_API_KEY", "NEBIUS_API_KEY", "TAVILY_API_KEY")
+_missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+if _missing:
+    sys.exit(f"Missing required environment variables: {', '.join(_missing)}\nCopy .env.example to .env and fill in your keys.")
+
+WAV_HEADER_BYTES = 44  # canonical RIFF/WAV header size; Gradium WAVs use standard 44-byte headers
 SAMPLE_RATE = 24000  # Gradium "pcm": 24 kHz, 16-bit signed LE, mono
 FRAME_SAMPLES = 1920  # 80 ms
 # Noisy-room tuning (see Gradium turn-taking guide: "require several consecutive
@@ -69,7 +76,11 @@ def emit(event_type: str, payload: dict) -> None:
         _last_status = payload  # remember for late-connecting browsers
     if not _ws_clients:
         return
-    msg = json.dumps({"type": event_type, **payload})
+    try:
+        msg = json.dumps({"type": event_type, **payload})
+    except (TypeError, ValueError) as exc:
+        log(f"[ws] emit serialization error ({event_type}): {exc}")
+        return
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_broadcast(msg))
@@ -82,7 +93,8 @@ async def _broadcast(msg: str) -> None:
         try:
             if not ws.closed:
                 await ws.send_str(msg)
-        except Exception:
+        except Exception as exc:
+            log(f"[ws] broadcast error: {exc}")
             _ws_clients.discard(ws)
 
 
@@ -258,7 +270,7 @@ def _barker_duration(path: Path) -> float:
     """
     with wave.open(str(path), "rb") as wf:
         sr, ch, sw = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
-    pcm_bytes = path.stat().st_size - 44
+    pcm_bytes = path.stat().st_size - WAV_HEADER_BYTES
     return pcm_bytes / (sr * ch * sw)
 
 
@@ -269,7 +281,10 @@ def load_barkers() -> list[dict]:
         return []
     barkers = json.loads(manifest.read_text())
     for b in barkers:
-        b["duration"] = _barker_duration(BARKERS_DIR / b["file"])
+        file = Path(b["file"])
+        if file.parent != Path(".") or file.suffix.lower() != ".wav":
+            raise ValueError(f"Unsafe barker path in manifest: {b['file']!r}")
+        b["duration"] = _barker_duration(BARKERS_DIR / file)
     return barkers
 
 
@@ -303,13 +318,10 @@ def play_barker(barkers: list[dict], budget: float = 0.0) -> dict | None:
         sr = wf.getframerate()
         ch = wf.getnchannels()
     # Gradium WAVs carry an unreliable RIFF size, so wf.getnframes() under-reports.
-    # Read the PCM payload directly: skip the 44-byte canonical header.
-    data = path.read_bytes()[44:]
-    audio = sd.RawOutputStream(samplerate=sr, channels=ch, dtype="int16")
-    audio.start()
-    audio.write(data)
-    audio.stop()
-    audio.close()
+    # Read the PCM payload directly: skip the canonical header.
+    data = path.read_bytes()[WAV_HEADER_BYTES:]
+    with sd.RawOutputStream(samplerate=sr, channels=ch, dtype="int16") as audio:
+        audio.write(data)
     return pick
 
 
@@ -360,7 +372,6 @@ async def main():
     prep_budget = await calibrate_prep_latency()
 
     stream, q = mic_stream()
-    stream.start()
     print(f"Listening @ {SAMPLE_RATE} Hz. Speak — Ctrl+C to stop.\n")
 
     async def fact_check_turn(text: str) -> None:
@@ -514,6 +525,7 @@ async def main():
                     return
 
         try:
+            stream.start()
             await asyncio.gather(producer(), consumer())
         except asyncio.CancelledError:
             pass

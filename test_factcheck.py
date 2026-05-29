@@ -261,12 +261,6 @@ _NAMED_CLAIMS = [
 ]
 
 
-@pytest.mark.parametrize("turn", _VAGUE_TURNS)
-def test_parse_claim_response_none_for_vague_subject(turn):
-    """When the LLM correctly returns NONE for an unresolvable subject,
-    parse_claim_response must return None (not pass it through as a claim)."""
-    assert parse_claim_response("NONE") is None
-
 
 @pytest.mark.parametrize("claim", _VAGUE_TURNS)
 def test_score_verdict_vague_subject_no_evidence_is_unknown(claim):
@@ -301,3 +295,71 @@ def test_score_verdict_named_entity_can_still_fire(claim):
     answer = "This claim is false. Evidence directly contradicts this assertion."
     v = score_verdict(claim, answer, [])
     assert v["status"] == "contradicted"
+
+
+# ---------------------------------------------------------------------------
+# parse_claim_response — vague subject (fixed test)
+# ---------------------------------------------------------------------------
+# The LLM is responsible for detecting vague/unresolvable subjects and
+# returning "NONE". parse_claim_response's role is only to translate "NONE"
+# into Python None. If the LLM echoes back a vague string directly,
+# parse_claim_response passes it through — it has no knowledge of whether a
+# subject is vague. The guard lives in the LLM prompt, not here.
+
+def test_parse_claim_response_passes_through_vague_strings():
+    """parse_claim_response does NOT filter vague subjects — that is the LLM's
+    responsibility. A vague string that the LLM fails to suppress is passed
+    through as a valid claim string."""
+    vague = "our nation invested in research more than any time in the past"
+    assert parse_claim_response(vague) == vague
+
+
+# ---------------------------------------------------------------------------
+# play_audio — stream lifecycle (resource safety)
+# ---------------------------------------------------------------------------
+
+import io
+import wave
+import struct
+from unittest.mock import MagicMock, patch, call
+
+
+def _make_wav_bytes(sr: int = 24000, channels: int = 1, n_frames: int = 100) -> bytes:
+    """Build a minimal valid WAV (PCM s16le) in memory."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sr)
+        wf.writeframes(b"\x00\x00" * n_frames)
+    return buf.getvalue()
+
+
+def test_play_audio_closes_stream_on_success():
+    """play_audio must close the audio stream after successful playback."""
+    from factcheck import play_audio
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        play_audio(_make_wav_bytes())
+
+    mock_stream.__exit__.assert_called_once()
+
+
+def test_play_audio_closes_stream_on_write_error():
+    """play_audio must close the audio stream even when write() raises."""
+    from factcheck import play_audio
+
+    mock_stream = MagicMock()
+    mock_stream.__enter__ = MagicMock(return_value=mock_stream)
+    mock_stream.__exit__ = MagicMock(return_value=False)
+    mock_stream.write.side_effect = RuntimeError("buffer overrun")
+
+    with patch("sounddevice.RawOutputStream", return_value=mock_stream):
+        with pytest.raises(RuntimeError, match="buffer overrun"):
+            play_audio(_make_wav_bytes())
+
+    mock_stream.__exit__.assert_called_once()

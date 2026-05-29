@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 import gradium
 from dotenv import load_dotenv
@@ -121,7 +122,7 @@ BARKERS = [
      "for about thirty seconds, because this is worth getting right. Here's what we actually know."),
 ]
 
-OUT_DIR = "barkers"
+OUT_DIR = Path(__file__).parent / "barkers"
 
 
 async def generate_one(client, idx: int, voice_id: str, voice_label: str, text: str) -> dict:
@@ -150,7 +151,7 @@ async def main():
         entry = await generate_one(client, idx, voice_id, voice_label, text)
         manifest.append(entry)
 
-    manifest_path = os.path.join(OUT_DIR, "manifest.json")
+    manifest_path = OUT_DIR / "manifest.json"
     with open(manifest_path, "w") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False)
     print(f"\nDone. {len(manifest)} barkers written to {manifest_path}")

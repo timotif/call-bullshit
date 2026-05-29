@@ -18,6 +18,35 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+WAV_HEADER_BYTES = 44  # canonical RIFF/WAV header size; Gradium WAVs use standard 44-byte headers
+
+# ---------------------------------------------------------------------------
+# Lazy-initialised cached API clients (avoid per-call connection churn)
+# ---------------------------------------------------------------------------
+
+_nebius_client: "OpenAI | None" = None
+_tavily_client: "TavilyClient | None" = None
+
+
+def _get_nebius_client() -> "OpenAI":
+    global _nebius_client
+    if _nebius_client is None:
+        from openai import OpenAI
+        _nebius_client = OpenAI(
+            base_url="https://api.studio.nebius.com/v1/",
+            api_key=os.environ["NEBIUS_API_KEY"],
+        )
+    return _nebius_client
+
+
+def _get_tavily_client() -> "TavilyClient":
+    global _tavily_client
+    if _tavily_client is None:
+        from tavily import TavilyClient
+        _tavily_client = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+    return _tavily_client
+
+
 # ---------------------------------------------------------------------------
 # Heuristic word lists for score_verdict
 # ---------------------------------------------------------------------------
@@ -166,12 +195,7 @@ def parse_verdict_response(
 
 def judge_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) -> dict:
     """Call Nebius LLM to judge the verdict and return the canonical verdict dict."""
-    from openai import OpenAI
-
-    client = OpenAI(
-        base_url="https://api.studio.nebius.com/v1/",
-        api_key=os.environ["NEBIUS_API_KEY"],
-    )
+    client = _get_nebius_client()
 
     system_prompt = (
         'You are a fact-checker. Given a CLAIM and web SEARCH RESULTS, decide if the '
@@ -205,6 +229,8 @@ def judge_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) ->
         f"[{i+1}] {r.get('content', '')[:400]}"
         for i, r in enumerate(tavily_results[:2])
     )
+    # TODO(security): claim and tavily_answer are untrusted — consider length-capping and
+    # stripping injection patterns before interpolating into the LLM user message.
     user_message = (
         f"CLAIM: {claim}\n\n"
         f"SEARCH ANSWER: {tavily_answer}\n\n"
@@ -227,12 +253,7 @@ def judge_verdict(claim: str, tavily_answer: str, tavily_results: list[dict]) ->
 
 def extract_claim(transcript: str) -> str | None:
     """Call Nebius to extract the single most checkable claim from transcript."""
-    from openai import OpenAI
-
-    client = OpenAI(
-        base_url="https://api.studio.nebius.com/v1/",
-        api_key=os.environ["NEBIUS_API_KEY"],
-    )
+    client = _get_nebius_client()
 
     system_prompt = (
         "You extract claims for a fact-checker. Given a spoken turn, restate the "
@@ -250,6 +271,7 @@ def extract_claim(transcript: str) -> str | None:
         "If the turn contains no checkable factual claim, reply with exactly: NONE"
     )
 
+    # TODO(security): transcript is raw speaker input — prompt injection possible if adversarial use.
     resp = client.chat.completions.create(
         model="meta-llama/Llama-3.3-70B-Instruct",
         messages=[
@@ -271,9 +293,7 @@ def fact_check(claim: str, timings: dict | None = None) -> dict:
     Falls back to score_verdict (heuristic) if judge_verdict raises any error.
     If `timings` is passed, records `tavily` and `judge` stage durations (s).
     """
-    from tavily import TavilyClient
-
-    tv = TavilyClient(api_key=os.environ["TAVILY_API_KEY"])
+    tv = _get_tavily_client()
     # Phrase as a verification question so Tavily's answer engine evaluates the
     # claim's truth, instead of returning pages where the claim's words merely
     # co-occur (which made false claims like "Paris is in Belgium" look supported).
@@ -337,16 +357,11 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
     Returns a 1-2 sentence plain-text string suitable for TTS.
     Falls back to _fallback_rebuttal if Nebius fails.
     """
-    from openai import OpenAI
-
     claim = verdict.get("claim", "")
     summary = verdict.get("summary", "")
 
     try:
-        client = OpenAI(
-            base_url="https://api.studio.nebius.com/v1/",
-            api_key=os.environ["NEBIUS_API_KEY"],
-        )
+        client = _get_nebius_client()
 
         if barker_text:
             system_prompt = (
@@ -356,8 +371,10 @@ def generate_rebuttal(verdict: dict, barker_text: str | None = None) -> str:
                 "naturally from where the opener left off, as if it is one continuous speech. "
                 "Do NOT re-introduce yourself. Do NOT repeat the opener. Do NOT say 'Well actually' "
                 "or any similar transition — just continue the thought and land the correction. "
-                "No markdown. No URLs. No citations. Plain spoken text only."
+                "No markdown. No URLs. No Citations. Plain spoken text only."
             )
+            # TODO(security): claim and summary are LLM-derived from untrusted speaker input — sanitize
+            # before production adversarial use.
             user_message = (
                 f"OPENER YOU ALREADY SAID: {barker_text}\n\n"
                 f"CLAIM (what they said): {claim}\n\n"
@@ -421,13 +438,10 @@ def play_audio(wav_bytes: bytes) -> None:
         sr = wf.getframerate()
         ch = wf.getnchannels()
 
-    pcm = wav_bytes[44:]
+    pcm = wav_bytes[WAV_HEADER_BYTES:]
 
-    out = sd.RawOutputStream(samplerate=sr, channels=ch, dtype="int16")
-    out.start()
-    out.write(pcm)
-    out.stop()
-    out.close()
+    with sd.RawOutputStream(samplerate=sr, channels=ch, dtype="int16") as out:
+        out.write(pcm)
 
 
 # ---------------------------------------------------------------------------
@@ -436,6 +450,11 @@ def play_audio(wav_bytes: bytes) -> None:
 
 if __name__ == "__main__":
     import json
+
+    _REQUIRED_ENV = ("GRADIUM_API_KEY", "NEBIUS_API_KEY", "TAVILY_API_KEY")
+    _missing = [k for k in _REQUIRED_ENV if not os.environ.get(k)]
+    if _missing:
+        sys.exit(f"Missing required environment variables: {', '.join(_missing)}\nCopy .env.example to .env and fill in your keys.")
 
     if len(sys.argv) > 1:
         transcript = " ".join(sys.argv[1:])
