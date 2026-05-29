@@ -46,13 +46,29 @@ def test_pick_barker_returns_covering_barker():
     barkers = _barkers([3.0, 6.0, 10.0])
     pick = pick_barker(barkers, budget=5.0)
     assert pick["duration"] >= 5.0
+    assert pick["duration"] <= 5.0 + main.BARKER_LENGTH_BAND
 
 
-def test_pick_barker_falls_back_to_longest_when_none_cover():
-    """When no barker covers the budget, return the longest."""
+def test_pick_barker_stays_in_length_band():
+    """Never pick a long ramble when a short opener fits the band."""
+    barkers = _barkers([2.5, 3.0, 40.0])
+    for _ in range(8):
+        pick = pick_barker(barkers, budget=2.5)
+        assert pick["duration"] <= 2.5 + main.BARKER_LENGTH_BAND
+
+
+def test_pick_barker_band_miss_uses_shortest_covering():
+    """No in-band match → shortest barker that still covers budget."""
+    barkers = _barkers([2.0, 2.8, 10.0])
+    pick = pick_barker(barkers, budget=2.5)
+    assert pick["duration"] == 2.8
+
+
+def test_pick_barker_falls_back_to_shortest_when_none_cover():
+    """When no barker covers the budget, return the shortest in the library."""
     barkers = _barkers([2.0, 4.0])
     pick = pick_barker(barkers, budget=99.0)
-    assert pick["duration"] == 4.0
+    assert pick["duration"] == 2.0
 
 
 # ---------------------------------------------------------------------------
@@ -61,33 +77,30 @@ def test_pick_barker_falls_back_to_longest_when_none_cover():
 
 def test_pick_barker_does_not_repeat_consecutively():
     """Calling pick_barker twice in a row must not return the same barker
-    when there are multiple eligible candidates."""
-    barkers = _barkers([6.0, 7.0, 8.0])
+    when there are multiple eligible candidates in the length band."""
+    barkers = _barkers([5.0, 5.5, 6.0])
     first = pick_barker(barkers, budget=5.0)
     second = pick_barker(barkers, budget=5.0)
     assert first["file"] != second["file"]
 
 
 def test_pick_barker_cycles_through_full_pool_before_repeating():
-    """With N eligible barkers, the same barker must not appear twice
-    until all others in the eligible set have been played."""
-    barkers = _barkers([5.0, 6.0, 7.0])
+    """With N in-band barkers, cycle through all before repeating."""
+    barkers = _barkers([5.0, 5.5, 6.0])
     seen = []
     for _ in range(len(barkers)):
-        pick = pick_barker(barkers, budget=4.0)
+        pick = pick_barker(barkers, budget=5.0)
         seen.append(pick["file"])
-    # All three should be distinct in one full cycle
     assert len(set(seen)) == len(barkers)
 
 
 def test_pick_barker_exhausted_pool_resets_and_continues():
     """After exhausting the pool the sequence resets — next pick is valid."""
-    barkers = _barkers([5.0, 6.0])
+    barkers = _barkers([5.0, 5.5])
     seen = []
     for _ in range(4):  # two full cycles
-        pick = pick_barker(barkers, budget=4.0)
+        pick = pick_barker(barkers, budget=5.0)
         seen.append(pick["file"])
-    # No two adjacent picks are the same
     for a, b in zip(seen, seen[1:]):
         assert a != b
 

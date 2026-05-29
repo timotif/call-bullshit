@@ -61,8 +61,11 @@ DEBUG = bool(os.environ.get("DEBUG"))
 # Headroom (s) added to the calibrated prep latency when sizing the barker, so
 # normal per-call variance doesn't leak dead-air. Set CALIBRATE=0 to skip the
 # startup mock round (uses the longest barker, safest but most talk-time).
-CALIBRATION_MARGIN = float(os.environ.get("CALIBRATION_MARGIN", "1.5"))
-CALIBRATION_MAX = float(os.environ.get("CALIBRATION_MAX", "17.0"))  # never pick a barker longer than this
+CALIBRATION_MARGIN = float(os.environ.get("CALIBRATION_MARGIN", "0.5"))
+CALIBRATION_MAX = float(os.environ.get("CALIBRATION_MAX", "17.0"))  # cap on measured prep budget
+# Shuffle only among openers in [budget, budget + band] (seconds). Stops a 2.7s budget
+# from selecting a random 37s ramble from the whole library.
+BARKER_LENGTH_BAND = float(os.environ.get("BARKER_LENGTH_BAND", "1.0"))
 CALIBRATE = os.environ.get("CALIBRATE", "1") != "0"
 # Hold the first N streamed PCM chunks before playback starts, so a slow/cold
 # TTS round can't underrun the device the moment playback outpaces synthesis.
@@ -557,21 +560,31 @@ _barker_queues: dict[frozenset, list[dict]] = {}
 _barker_last: dict[frozenset, str] = {}  # last file played per pool key
 
 
-def pick_barker(barkers: list[dict], budget: float) -> dict:
-    """Pick a random barker whose duration covers `budget` (the prep latency).
+def _shortest_duration_pool(candidates: list[dict]) -> list[dict]:
+    """Barkers tied for minimum duration (shuffle among peers at that length)."""
+    min_dur = min(b.get("duration", 0.0) for b in candidates)
+    return [b for b in candidates if b.get("duration", 0.0) == min_dur]
 
-    Uses a shuffle-queue per eligible pool so the same barker is never picked
-    twice until all others in the pool have been played. On pool reset, ensures
-    the first pick of the new cycle doesn't repeat the last pick of the old one.
-    If no barker covers the budget, falls back to the pool of longest-duration
-    barkers.
+
+def pick_barker(barkers: list[dict], budget: float) -> dict:
+    """Pick a random barker near the calibrated prep budget.
+
+    Primary pool: budget <= duration <= budget + BARKER_LENGTH_BAND (shuffle
+    among ~right-length openers only). If none fit the band, use the shortest
+    barker that still covers budget; if nothing is long enough, the shortest
+    in the library (rebuttal may start slightly before the opener ends).
     """
-    covering = [b for b in barkers if b.get("duration", 0.0) >= budget]
-    if covering:
-        pool = covering
+    budget = max(0.0, budget)
+    hi = budget + BARKER_LENGTH_BAND
+    in_band = [
+        b for b in barkers
+        if budget <= b.get("duration", 0.0) <= hi
+    ]
+    if in_band:
+        pool = in_band
     else:
-        max_dur = max(b.get("duration", 0.0) for b in barkers)
-        pool = [b for b in barkers if b.get("duration", 0.0) == max_dur]
+        covering = [b for b in barkers if b.get("duration", 0.0) >= budget]
+        pool = _shortest_duration_pool(covering) if covering else _shortest_duration_pool(barkers)
 
     key = frozenset(b["file"] for b in pool)
     if key not in _barker_queues or not _barker_queues[key]:
