@@ -12,8 +12,29 @@ load_dotenv()
 # Each entry: (voice_id, voice_label, text)
 # Voices picked for interrupt energy across US + UK accents.
 # Texts graded by length so the runtime can pick the shortest that covers
-# the session's measured rebuttal-prep latency (~4s → ~17s spread).
+# the session's measured rebuttal-prep latency. With streaming TTS the budget
+# is now ~1-2s (was ~4-17s), so the short tier below is what normally fires;
+# the longer tiers remain as cover for slow/cold rounds where the budget spikes.
 BARKERS = [
+    # ── ~1-2s (streaming-era default: quick interjection, rebuttal lands fast) ─
+    ("POBHtemksfWQbng0", "garrett",
+     "Whoa — no. That's wrong."),
+
+    ("6MFfc37kq0sBjBjy", "sterling",
+     "Nope. Not true."),
+
+    ("dME3IWyZBvmh1n1q", "toby",
+     "Hold on — that's wrong."),
+
+    ("6PWnV0Nq4wu7RVBT", "maeve",
+     "Wait — that's not right."),
+
+    ("_6Aslh2DxfmnRLmP", "russell",
+     "Hang on — no."),
+
+    ("CF0NgaMwHMMrHZn0", "reuben",
+     "Stop — that's false."),
+
     # ── ~4s ─────────────────────────────────────────────────────────────────
     ("POBHtemksfWQbng0", "garrett",
      "Whoa — hold on. That's not right. Let me stop you there."),
