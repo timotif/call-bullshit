@@ -10,9 +10,9 @@ Built in a **5-hour hackathon** in Berlin (29 May 2026) with [Nebius](https://ne
 
 ## Demo
 
-<video src="https://github.com/user-attachments/assets/fa03d405-d31f-4d11-b369-d7fdf1864ff8" width="720" controls />
+<video src="https://github.com/user-attachments/assets/fa03d405-d31f-4d11-b369-d7fdf1864ff8" width="720" controls></video>
 
-`contradicted` on the [live dashboard](http://localhost:8765) → short barker → rebuttal
+Live fact-check → `contradicted` on the [live dashboard](http://localhost:8765) → short barker → rebuttal
 
 ---
 
